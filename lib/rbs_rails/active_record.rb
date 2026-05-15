@@ -61,6 +61,8 @@ module RbsRails
 
           #{collection_proxy_decl}
 
+          #{conditional_presence_markers}
+
           #{footer}
 
           #{dependencies.build}
@@ -234,6 +236,70 @@ module RbsRails
           end
           methods.join("\n")
         end.join("\n")
+      end
+
+      # Emits one marker class per conditional `validates :*, presence: true`
+      # (keyed by the `if:`/`unless:` predicate). Markers are intended to be
+      # composed by intersection with the model type — `OrderImport &
+      # OrderImport::ValidatedAsShipment` — once a Steep extension wires
+      # boolean predicates to a postcondition refinement (see
+      # felixefelip/steep, postcondition refinement issue).
+      private def conditional_presence_markers #: String
+        # @type var groups: Hash[[Symbol, Symbol], Array[Symbol]]
+        groups = {}
+
+        klass.validators.each do |validator|
+          next unless validator.is_a?(::ActiveModel::Validations::PresenceValidator)
+
+          key = conditional_presence_key(validator)
+          next unless key
+
+          (groups[key] ||= []).concat(validator.attributes)
+        end
+
+        groups.filter_map do |(kind, predicate), attrs|
+          methods = attrs.uniq.filter_map do |attr|
+            narrowed = narrow_type_for(attr)
+            narrowed && "def #{attr}: () -> #{narrowed}"
+          end
+          next if methods.empty?
+
+          marker = conditional_presence_marker_name(kind, predicate)
+          <<~RBS.chomp
+            class #{klass_name}::#{marker}
+              #{methods.join("\n  ")}
+            end
+          RBS
+        end.join("\n\n")
+      end
+
+      private def conditional_presence_key(validator) #: [Symbol, Symbol]?
+        if (m = validator.options[:if]).is_a?(Symbol)
+          [:if, m]
+        elsif (m = validator.options[:unless]).is_a?(Symbol)
+          [:unless, m]
+        end
+      end
+
+      private def conditional_presence_marker_name(kind, predicate) #: String
+        base = predicate.to_s.chomp("?")
+        camelized = base.split("_").map(&:capitalize).join
+        prefix = kind == :if ? "ValidatedAs" : "ValidatedUnless"
+        "#{prefix}#{camelized}"
+      end
+
+      private def narrow_type_for(attr_name) #: String?
+        if (assoc = klass.reflect_on_association(attr_name)) && assoc.macro == :belongs_to
+          return nil unless assoc.options[:optional]
+          return nil if assoc.polymorphic?
+          @dependencies << assoc.klass.name
+          return Util.module_name(assoc.klass)
+        end
+
+        col = klass.columns.find { |c| c.name == attr_name.to_s }
+        return nil unless col && col.null
+
+        sql_type_to_class(col.type)
       end
 
       private def generated_association_methods #: String
