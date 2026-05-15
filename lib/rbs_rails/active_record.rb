@@ -61,6 +61,8 @@ module RbsRails
 
           #{collection_proxy_decl}
 
+          #{validated_marker}
+
           #{conditional_presence_markers}
 
           #{footer}
@@ -245,6 +247,87 @@ module RbsRails
       # boolean predicates to a postcondition refinement (see
       # felixefelip/steep, postcondition refinement issue).
       private def conditional_presence_markers #: String
+        conditional_presence_groups.filter_map do |(kind, predicate), attrs|
+          methods = narrowed_method_decls(attrs)
+          next if methods.empty?
+
+          marker = conditional_presence_marker_name(kind, predicate)
+          <<~RBS.chomp
+            class #{klass_name}::#{marker}
+              #{methods.join("\n  ")}
+            end
+          RBS
+        end.join("\n\n")
+      end
+
+      # Emits the `Validated` marker class with narrowed getters for every
+      # attribute covered by an *unconditional* `validates :*, presence: true`
+      # validation. Composed by intersection at `update`/`save`/`valid?` truthy
+      # branches (issue felixefelip/steep, conditional postconditions).
+      private def validated_marker #: String
+        methods = narrowed_method_decls(unconditional_presence_attrs)
+        return "" if methods.empty?
+
+        <<~RBS.chomp
+          class #{klass_name}::Validated
+            #{methods.join("\n  ")}
+          end
+        RBS
+      end
+
+      # Returns the YAML-ready postcondition entries for this model. Each
+      # entry maps a method call (whose receiver is the model) to a `self`
+      # refinement to apply on the truthy/falsy branch. See
+      # `.steep_postconditions.yml` consumed by Steep.
+      #
+      # Returned as an Array of Hashes with string keys so the CLI can YAML.dump
+      # them without symbol-prefix noise.
+      def postcondition_entries #: Array[Hash[String, untyped]]
+        entries = [] #: Array[Hash[String, untyped]]
+        short_name = klass_name(abs: false)
+
+        if !narrowed_method_decls(unconditional_presence_attrs).empty?
+          target = "#{short_name} & #{short_name}::Validated"
+          VALIDATED_POSTCONDITION_METHODS.each do |method|
+            entries << {
+              "class" => short_name,
+              "method" => method,
+              "when_true" => { "self" => target },
+            }
+          end
+        end
+
+        conditional_presence_groups.each do |(kind, predicate), attrs|
+          next if narrowed_method_decls(attrs).empty?
+
+          marker = conditional_presence_marker_name(kind, predicate)
+          target = "#{short_name} & #{short_name}::#{marker}"
+          branch = kind == :if ? "when_true" : "when_false"
+
+          entries << {
+            "class" => short_name,
+            "method" => predicate.to_s,
+            branch => { "self" => target },
+          }
+        end
+
+        entries
+      end
+
+      # AR / AM methods that succeed only when all validations pass. Truthy
+      # return ⇒ the receiver is freshly validated, so `self` refines to
+      # `Model & Model::Validated`.
+      VALIDATED_POSTCONDITION_METHODS = %w[valid? save save! update update!]
+
+      # @rbs attrs: Array[Symbol]
+      private def narrowed_method_decls(attrs) #: Array[String]
+        attrs.uniq.filter_map do |attr|
+          narrowed = narrow_type_for(attr)
+          narrowed && "def #{attr}: () -> #{narrowed}"
+        end
+      end
+
+      private def conditional_presence_groups #: Hash[[Symbol, Symbol], Array[Symbol]]
         # @type var groups: Hash[[Symbol, Symbol], Array[Symbol]]
         groups = {}
 
@@ -257,20 +340,20 @@ module RbsRails
           (groups[key] ||= []).concat(validator.attributes)
         end
 
-        groups.filter_map do |(kind, predicate), attrs|
-          methods = attrs.uniq.filter_map do |attr|
-            narrowed = narrow_type_for(attr)
-            narrowed && "def #{attr}: () -> #{narrowed}"
-          end
-          next if methods.empty?
+        groups
+      end
 
-          marker = conditional_presence_marker_name(kind, predicate)
-          <<~RBS.chomp
-            class #{klass_name}::#{marker}
-              #{methods.join("\n  ")}
-            end
-          RBS
-        end.join("\n\n")
+      private def unconditional_presence_attrs #: Array[Symbol]
+        attrs = [] #: Array[Symbol]
+
+        klass.validators.each do |validator|
+          next unless validator.is_a?(::ActiveModel::Validations::PresenceValidator)
+          next if validator.options[:if] || validator.options[:unless]
+
+          attrs.concat(validator.attributes)
+        end
+
+        attrs
       end
 
       private def conditional_presence_key(validator) #: [Symbol, Symbol]?

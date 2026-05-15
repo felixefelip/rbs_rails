@@ -269,4 +269,210 @@ class ConditionalPresenceMarkersTest < Minitest::Test
     RBS
     assert_equal expected, markers
   end
+
+  # -------------------------------------------------------------------
+  # Layer A — Validated marker emission for unconditional presence validations
+  # -------------------------------------------------------------------
+
+  def validated_marker
+    RbsRails::ActiveRecord::Generator
+      .new(CondPresenceFixtureModel)
+      .send(:validated_marker)
+  end
+
+  def test_validated_marker_emitted_for_unconditional_presence_on_nullable_column
+    CondPresenceFixtureModel.test_validators = [presence_validator(:name)]
+    CondPresenceFixtureModel.test_columns = [Column.new('name', true, :string)]
+
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::Validated
+        def name: () -> ::String
+      end
+    RBS
+    assert_equal expected, validated_marker
+  end
+
+  def test_validated_marker_emitted_for_unconditional_presence_on_optional_belongs_to
+    CondPresenceFixtureModel.test_validators = [presence_validator(:target)]
+    CondPresenceFixtureModel.test_associations = {
+      target: Association.new(:belongs_to, CondPresenceFixtureTarget, false, { optional: true })
+    }
+
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::Validated
+        def target: () -> ::CondPresenceFixtureTarget
+      end
+    RBS
+    assert_equal expected, validated_marker
+  end
+
+  def test_validated_marker_groups_attrs_across_multiple_unconditional_validators
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator(:name),
+      presence_validator([:email, :token]),
+    ]
+    CondPresenceFixtureModel.test_columns = [
+      Column.new('name', true, :string),
+      Column.new('email', true, :string),
+      Column.new('token', true, :string),
+    ]
+
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::Validated
+        def name: () -> ::String
+        def email: () -> ::String
+        def token: () -> ::String
+      end
+    RBS
+    assert_equal expected, validated_marker
+  end
+
+  def test_validated_marker_skipped_when_only_conditional_presence
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator(:a, if_: :foo?)
+    ]
+    CondPresenceFixtureModel.test_columns = [Column.new('a', true, :string)]
+
+    assert_equal '', validated_marker
+  end
+
+  def test_validated_marker_skipped_when_no_attr_is_narrowable
+    # Unconditional presence on a non-nullable column — already non-nil, nothing to narrow.
+    CondPresenceFixtureModel.test_validators = [presence_validator(:name)]
+    CondPresenceFixtureModel.test_columns = [Column.new('name', false, :string)]
+
+    assert_equal '', validated_marker
+  end
+
+  def test_validated_marker_skipped_when_no_presence_validators
+    assert_equal '', validated_marker
+  end
+
+  def test_validated_marker_drops_non_narrowable_attrs_but_keeps_emitter_when_at_least_one_works
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator([:narrow_me, :already_nonnull])
+    ]
+    CondPresenceFixtureModel.test_columns = [
+      Column.new('narrow_me', true, :string),
+      Column.new('already_nonnull', false, :string),
+    ]
+
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::Validated
+        def narrow_me: () -> ::String
+      end
+    RBS
+    assert_equal expected, validated_marker
+  end
+
+  # -------------------------------------------------------------------
+  # postcondition_entries — public API for the YAML sidecar
+  # -------------------------------------------------------------------
+
+  VALIDATED_METHODS = %w[valid? save save! update update!]
+
+  def postcondition_entries
+    RbsRails::ActiveRecord::Generator
+      .new(CondPresenceFixtureModel)
+      .postcondition_entries
+  end
+
+  def test_postcondition_entries_layer_a_emits_one_per_validated_method
+    CondPresenceFixtureModel.test_validators = [presence_validator(:name)]
+    CondPresenceFixtureModel.test_columns = [Column.new('name', true, :string)]
+
+    expected = VALIDATED_METHODS.map do |m|
+      {
+        "class" => "CondPresenceFixtureModel",
+        "method" => m,
+        "when_true" => { "self" => "CondPresenceFixtureModel & CondPresenceFixtureModel::Validated" },
+      }
+    end
+    assert_equal expected, postcondition_entries
+  end
+
+  def test_postcondition_entries_layer_b_if_predicate_uses_when_true
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator(:a, if_: :paid?)
+    ]
+    CondPresenceFixtureModel.test_columns = [Column.new('a', true, :string)]
+
+    assert_equal(
+      [{
+        "class" => "CondPresenceFixtureModel",
+        "method" => "paid?",
+        "when_true" => { "self" => "CondPresenceFixtureModel & CondPresenceFixtureModel::ValidatedAsPaid" },
+      }],
+      postcondition_entries
+    )
+  end
+
+  def test_postcondition_entries_layer_b_unless_predicate_uses_when_false
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator(:a, unless_: :free?)
+    ]
+    CondPresenceFixtureModel.test_columns = [Column.new('a', true, :string)]
+
+    assert_equal(
+      [{
+        "class" => "CondPresenceFixtureModel",
+        "method" => "free?",
+        "when_false" => { "self" => "CondPresenceFixtureModel & CondPresenceFixtureModel::ValidatedUnlessFree" },
+      }],
+      postcondition_entries
+    )
+  end
+
+  def test_postcondition_entries_mix_layer_a_and_layer_b
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator(:name),
+      presence_validator(:a, if_: :paid?),
+    ]
+    CondPresenceFixtureModel.test_columns = [
+      Column.new('name', true, :string),
+      Column.new('a', true, :string),
+    ]
+
+    entries = postcondition_entries
+    assert_equal VALIDATED_METHODS.length + 1, entries.length
+
+    layer_a = entries.select { |e| e["when_true"]&.fetch("self") == "CondPresenceFixtureModel & CondPresenceFixtureModel::Validated" }
+    assert_equal VALIDATED_METHODS.sort, layer_a.map { |e| e["method"] }.sort
+
+    layer_b = entries.detect { |e| e["method"] == "paid?" }
+    assert_equal(
+      { "self" => "CondPresenceFixtureModel & CondPresenceFixtureModel::ValidatedAsPaid" },
+      layer_b["when_true"]
+    )
+  end
+
+  def test_postcondition_entries_empty_when_no_validators
+    assert_equal [], postcondition_entries
+  end
+
+  def test_postcondition_entries_empty_when_no_narrowable_attrs
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator(:name),
+      presence_validator(:a, if_: :paid?),
+    ]
+    CondPresenceFixtureModel.test_columns = [
+      Column.new('name', false, :string),
+      Column.new('a', false, :string),
+    ]
+
+    assert_equal [], postcondition_entries
+  end
+
+  def test_postcondition_entries_skip_layer_a_when_only_conditional_validators
+    CondPresenceFixtureModel.test_validators = [
+      presence_validator(:a, if_: :paid?)
+    ]
+    CondPresenceFixtureModel.test_columns = [Column.new('a', true, :string)]
+
+    entries = postcondition_entries
+    refute(
+      entries.any? { |e| VALIDATED_METHODS.include?(e["method"]) },
+      "no Validated postconditions when there are no unconditional presence validators"
+    )
+  end
 end

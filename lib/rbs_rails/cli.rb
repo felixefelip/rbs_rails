@@ -1,4 +1,5 @@
 require "optparse"
+require "yaml"
 require "rbs_rails/cli/configuration"
 
 module RbsRails
@@ -30,11 +31,13 @@ module RbsRails
           load_config
           generate_models
           generate_path_helpers
+          generate_postconditions_sidecar
           0
         when "models"
           load_application
           load_config
           generate_models
+          generate_postconditions_sidecar
           0
         when "path_helpers"
           load_application
@@ -94,6 +97,8 @@ module RbsRails
       check_db_migrations!
       Rails.application.eager_load!
 
+      @postcondition_entries = [] #: Array[Hash[String, untyped]]
+
       ::ActiveRecord::Base.descendants.each do |klass|
         generate_single_model(klass)
       rescue => e
@@ -132,10 +137,33 @@ module RbsRails
       path = config.signature_root_dir / rbs_relative_path
       path.dirname.mkpath
 
-      sig = RbsRails::ActiveRecord.class_to_rbs(klass)
-      Util::FileWriter.new(path).write sig
+      generator = RbsRails::ActiveRecord::Generator.new(klass)
+      Util::FileWriter.new(path).write generator.generate
+
+      collect_postcondition_entries(generator)
 
       true
+    end
+
+    # @rbs generator: RbsRails::ActiveRecord::Generator
+    private def collect_postcondition_entries(generator) #: void
+      return unless @postcondition_entries
+
+      @postcondition_entries.concat(generator.postcondition_entries)
+    end
+
+    # Writes the aggregated `.steep_postconditions.yml` sidecar consumed by
+    # Steep (felixefelip/steep, conditional postconditions). No-op if no
+    # model produced any entry, so untouched projects don't get a stray file.
+    def generate_postconditions_sidecar #: void
+      entries = @postcondition_entries
+      return if entries.nil? || entries.empty?
+
+      sorted = entries.sort_by { |e| [e["class"], e["method"]] }
+
+      path = config.signature_root_dir.join(".steep_postconditions.yml")
+      path.dirname.mkpath
+      Util::FileWriter.new(path).write(YAML.dump("postconditions" => sorted))
     end
 
     def generate_path_helpers #: void
