@@ -42,7 +42,7 @@ module RbsRails
           # resolve-type-names: false
 
           #{header}
-            extend ::ActiveRecord::Base::ClassMethods[#{klass_name}, #{relation_class_name}, #{pk_type}]
+            extend ::ActiveRecord::Base::ClassMethods[#{klass_name}, #{relation_class_name}, #{pk_type}#{validated_model_arg}]
 
           #{columns}
           #{alias_columns}
@@ -102,7 +102,7 @@ module RbsRails
           class #{relation_class_name} < ::ActiveRecord::Relation
             include ::Enumerable[#{klass_name}]
             include #{generated_relation_methods_name}
-            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}]
+            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}#{validated_model_arg}]
           end
         RBS
       end
@@ -112,7 +112,7 @@ module RbsRails
           class #{klass_name}::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
             include ::Enumerable[#{klass_name}]
             include #{generated_relation_methods_name}
-            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}]
+            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}#{validated_model_arg}]
 
             def build: (?::ActiveRecord::Associations::CollectionProxy::_EachPair attributes) ?{ () -> untyped } -> #{klass_name}
                      | (::Array[::ActiveRecord::Associations::CollectionProxy::_EachPair] attributes) ?{ () -> untyped } -> ::Array[#{klass_name}]
@@ -273,6 +273,18 @@ module RbsRails
             #{methods.join("\n  ")}
           end
         RBS
+      end
+
+      # When the model has a `Validated` marker, pass it as the
+      # `ValidatedModel` type parameter to `Relation::Methods`,
+      # `Base::ClassMethods`, etc., so finders like `find`, `find_by!`,
+      # `first!`, `where.first`, …, return `Model & Model::Validated`.
+      # See the matching `ValidatedModel = Model` default in the
+      # gem_rbs_collection activerecord overrides.
+      private def validated_model_arg #: String
+        return "" if narrowed_method_decls(unconditional_presence_attrs).empty?
+
+        ", #{klass_name}::Validated"
       end
 
       # Returns the YAML-ready postcondition entries for this model. Each
