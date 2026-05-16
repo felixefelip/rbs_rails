@@ -380,6 +380,18 @@ module RbsRails
       private def unconditional_presence_attrs #: Array[Symbol]
         attrs = [] #: Array[Symbol]
 
+        # Rails registers a `PresenceValidator` with an internal `if:` lambda
+        # for every non-optional `belongs_to` (see Rails'
+        # `active_record/associations/builder/belongs_to.rb`). The lambda is
+        # an implementation detail, not a user-supplied condition, so the
+        # validator looks "conditional" to the loop below and would be
+        # skipped. Pre-include those associations directly.
+        klass.reflect_on_all_associations(:belongs_to).each do |a|
+          next if a.options[:optional]
+          next if a.polymorphic?
+          attrs << a.name
+        end
+
         klass.validators.each do |validator|
           next unless validator.is_a?(::ActiveModel::Validations::PresenceValidator)
           next if validator.options[:if] || validator.options[:unless]
@@ -387,7 +399,7 @@ module RbsRails
           attrs.concat(validator.attributes)
         end
 
-        attrs
+        attrs.uniq
       end
 
       private def conditional_presence_key(validator) #: [Symbol, Symbol]?

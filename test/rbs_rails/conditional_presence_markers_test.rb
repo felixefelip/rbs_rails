@@ -17,6 +17,19 @@ class CondPresenceFixtureModel
       (test_associations || {})[name]
     end
 
+    NamedAssociation = Struct.new(:name, :macro, :klass, :polymorphic_flag, :options) do
+      def polymorphic?
+        polymorphic_flag
+      end
+    end
+
+    def reflect_on_all_associations(macro)
+      (test_associations || {}).filter_map do |name, a|
+        next unless a.macro == macro
+        NamedAssociation.new(name, a.macro, a.klass, a.polymorphic_flag, a.options)
+      end
+    end
+
     def columns
       test_columns || []
     end
