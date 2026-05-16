@@ -222,13 +222,16 @@ module RbsRails
         klass.reflect_on_all_associations(:belongs_to).map do |a|
           @dependencies << a.klass.name unless a.polymorphic?
 
-          is_optional = a.options[:optional]
-
           type = a.polymorphic? ? 'untyped' : Util.module_name(a.klass)
           type_optional = optional(type)
+          # Always emit the nilable form on the model. `belongs_to` (non-
+          # optional) implicitly registers a `presence: true` validator, which
+          # the `Validated` marker picks up and narrows back to `Foo` —
+          # matching the lifecycle reality that a new record may not yet have
+          # the association set.
           # @type var methods: Array[String]
           methods = []
-          methods << "def #{a.name}: () -> #{is_optional ? type_optional : type}"
+          methods << "def #{a.name}: () -> #{type_optional}"
           methods << "def #{a.name}=: (#{type_optional}) -> #{type_optional}"
           methods << "def reload_#{a.name}: () -> #{type_optional}"
           if !a.polymorphic?
@@ -260,12 +263,18 @@ module RbsRails
         end.join("\n\n")
       end
 
-      # Emits the `Validated` marker class with narrowed getters for every
-      # attribute covered by an *unconditional* `validates :*, presence: true`
-      # validation. Composed by intersection at `update`/`save`/`valid?` truthy
-      # branches (issue felixefelip/steep, conditional postconditions).
+      # Emits the `Validated` marker class with non-nilable getters for every
+      # attribute that AR guarantees on a persisted+validated record:
+      #
+      # 1. `id` (when the column exists) — assigned on insert.
+      # 2. Attributes covered by an *unconditional* `validates :*, presence: true`.
+      # 3. `created_at` / `updated_at` (when columns exist) — set automatically.
+      #
+      # Composed by intersection at finder return types (`Model &
+      # Model::Validated`) and on `update`/`save`/`valid?` truthy branches
+      # (issue felixefelip/steep, conditional postconditions).
       private def validated_marker #: String
-        methods = narrowed_method_decls(unconditional_presence_attrs)
+        methods = narrowed_method_decls(validated_marker_attrs)
         return "" if methods.empty?
 
         <<~RBS.chomp
@@ -282,9 +291,22 @@ module RbsRails
       # See the matching `ValidatedModel = Model` default in the
       # gem_rbs_collection activerecord overrides.
       private def validated_model_arg #: String
-        return "" if narrowed_method_decls(unconditional_presence_attrs).empty?
+        return "" if narrowed_method_decls(validated_marker_attrs).empty?
 
         ", #{klass_name}::Validated"
+      end
+
+      # The attribute list that populates `Validated`. Order matters only
+      # for stable snapshot diffs: id first, then validated attrs, then
+      # timestamps last.
+      private def validated_marker_attrs #: Array[Symbol]
+        attrs = [] #: Array[Symbol]
+        attrs << :id if klass.columns.any? { |c| c.name == "id" }
+        attrs.concat(unconditional_presence_attrs)
+        %w[created_at updated_at].each do |ts|
+          attrs << ts.to_sym if klass.columns.any? { |c| c.name == ts }
+        end
+        attrs.uniq
       end
 
       # Returns the YAML-ready postcondition entries for this model. Each
@@ -385,14 +407,13 @@ module RbsRails
 
       private def narrow_type_for(attr_name) #: String?
         if (assoc = klass.reflect_on_association(attr_name)) && assoc.macro == :belongs_to
-          return nil unless assoc.options[:optional]
           return nil if assoc.polymorphic?
           @dependencies << assoc.klass.name
           return Util.module_name(assoc.klass)
         end
 
         col = klass.columns.find { |c| c.name == attr_name.to_s }
-        return nil unless col && col.null
+        return nil unless col
 
         sql_type_to_class(col.type)
       end
@@ -702,11 +723,16 @@ module RbsRails
                          end
           end
           sql_class_name = col.type == :datetime ? '::Time' : sql_type_to_class(col.type)
-          # If the DB says the column can be null, we need `<type>?`
-          # ...but if the type is already `untyped` there's no point in writing `untyped?`
+          # All columns are typed as nilable in the model — including `null: false`
+          # ones, plus `id`/`created_at`/`updated_at`. This reflects the truth of
+          # AR's two-state lifecycle: `Model.new` instances have nil-valued
+          # fields until `save` runs. Non-nil narrowing for persisted/validated
+          # records lives in `Model::Validated`, which is composed by
+          # intersection at finder return types (`Model & Model::Validated`)
+          # and on `update`/`save` truthy branches (Steep postcondition issue).
           class_name_opt = (class_name == 'untyped') ? 'untyped' : optional(class_name)
-          column_type = col.null ? class_name_opt : class_name
-          sql_column_type = col.null ? optional(sql_class_name) : sql_class_name
+          column_type = class_name_opt
+          sql_column_type = (sql_class_name == 'untyped') ? 'untyped' : optional(sql_class_name)
           sig = <<~EOS
             def #{col.name}: () -> #{column_type}
             def #{col.name}=: (#{column_type}) -> #{column_type}

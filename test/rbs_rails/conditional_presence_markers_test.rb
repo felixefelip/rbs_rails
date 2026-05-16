@@ -184,7 +184,10 @@ class ConditionalPresenceMarkersTest < Minitest::Test
     assert_equal '', markers
   end
 
-  def test_non_optional_belongs_to_is_dropped_from_marker
+  def test_non_optional_belongs_to_is_still_narrowed
+    # Under the always-nilable-in-the-model semantics, a non-optional
+    # belongs_to has the model getter typed as nilable, so the marker still
+    # narrows it back to the non-nilable association class.
     CondPresenceFixtureModel.test_validators = [
       presence_validator(:target, if_: :foo?)
     ]
@@ -192,17 +195,28 @@ class ConditionalPresenceMarkersTest < Minitest::Test
       target: Association.new(:belongs_to, CondPresenceFixtureTarget, false, {})
     }
 
-    # `belongs_to` without `optional: true` → already non-nil → nothing to narrow.
-    assert_equal '', markers
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::ValidatedAsFoo
+        def target: () -> ::CondPresenceFixtureTarget
+      end
+    RBS
+    assert_equal expected, markers
   end
 
-  def test_non_nullable_column_is_dropped_from_marker
+  def test_non_nullable_column_is_still_narrowed
+    # Same as above: even when the column carries `null: false`, the model
+    # getter is now nilable and the marker narrows back to the SQL type.
     CondPresenceFixtureModel.test_validators = [
       presence_validator(:a, if_: :foo?)
     ]
     CondPresenceFixtureModel.test_columns = [Column.new('a', false, :string)]
 
-    assert_equal '', markers
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::ValidatedAsFoo
+        def a: () -> ::String
+      end
+    RBS
+    assert_equal expected, markers
   end
 
   def test_unknown_attribute_is_dropped_from_marker
@@ -215,18 +229,22 @@ class ConditionalPresenceMarkersTest < Minitest::Test
   end
 
   def test_marker_only_emitted_when_some_attr_is_narrowable
-    # Two attrs in the same condition; only one is narrowable.
+    # Two attrs in the same condition; only one is narrowable. The
+    # non-narrowable cases that remain after the lifecycle change are
+    # polymorphic belongs_to and unknown attrs.
     CondPresenceFixtureModel.test_validators = [
-      presence_validator([:narrow_me, :already_nonnull], if_: :pred?)
+      presence_validator([:name, :poly], if_: :pred?)
     ]
     CondPresenceFixtureModel.test_columns = [
-      Column.new('narrow_me', true, :string),
-      Column.new('already_nonnull', false, :string)
+      Column.new('name', true, :string)
     ]
+    CondPresenceFixtureModel.test_associations = {
+      poly: Association.new(:belongs_to, nil, true, { optional: true })
+    }
 
     expected = <<~RBS.chomp
       class ::CondPresenceFixtureModel::ValidatedAsPred
-        def narrow_me: () -> ::String
+        def name: () -> ::String
       end
     RBS
     assert_equal expected, markers
@@ -336,10 +354,15 @@ class ConditionalPresenceMarkersTest < Minitest::Test
     assert_equal '', validated_marker
   end
 
-  def test_validated_marker_skipped_when_no_attr_is_narrowable
-    # Unconditional presence on a non-nullable column — already non-nil, nothing to narrow.
-    CondPresenceFixtureModel.test_validators = [presence_validator(:name)]
-    CondPresenceFixtureModel.test_columns = [Column.new('name', false, :string)]
+  def test_validated_marker_skipped_when_only_polymorphic_validator
+    # Only narrow_type_for nil-returning cases (polymorphic belongs_to,
+    # unknown attr) survive as "non-narrowable" — they keep the marker empty
+    # iff no other narrowable attr (column or non-polymorphic association) or
+    # id/timestamps exist.
+    CondPresenceFixtureModel.test_validators = [presence_validator(:target)]
+    CondPresenceFixtureModel.test_associations = {
+      target: Association.new(:belongs_to, nil, true, { optional: true })
+    }
 
     assert_equal '', validated_marker
   end
@@ -350,16 +373,66 @@ class ConditionalPresenceMarkersTest < Minitest::Test
 
   def test_validated_marker_drops_non_narrowable_attrs_but_keeps_emitter_when_at_least_one_works
     CondPresenceFixtureModel.test_validators = [
-      presence_validator([:narrow_me, :already_nonnull])
+      presence_validator([:name, :poly])
     ]
     CondPresenceFixtureModel.test_columns = [
-      Column.new('narrow_me', true, :string),
-      Column.new('already_nonnull', false, :string),
+      Column.new('name', true, :string),
+    ]
+    CondPresenceFixtureModel.test_associations = {
+      poly: Association.new(:belongs_to, nil, true, { optional: true })
+    }
+
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::Validated
+        def name: () -> ::String
+      end
+    RBS
+    assert_equal expected, validated_marker
+  end
+
+  def test_validated_marker_includes_id_when_id_column_exists
+    CondPresenceFixtureModel.test_columns = [Column.new('id', false, :integer)]
+
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::Validated
+        def id: () -> ::Integer
+      end
+    RBS
+    assert_equal expected, validated_marker
+  end
+
+  def test_validated_marker_includes_timestamps_when_columns_exist
+    CondPresenceFixtureModel.test_columns = [
+      Column.new('id', false, :integer),
+      Column.new('created_at', false, :datetime),
+      Column.new('updated_at', false, :datetime),
     ]
 
     expected = <<~RBS.chomp
       class ::CondPresenceFixtureModel::Validated
-        def narrow_me: () -> ::String
+        def id: () -> ::Integer
+        def created_at: () -> ::ActiveSupport::TimeWithZone
+        def updated_at: () -> ::ActiveSupport::TimeWithZone
+      end
+    RBS
+    assert_equal expected, validated_marker
+  end
+
+  def test_validated_marker_id_and_timestamps_combine_with_presence_attrs
+    CondPresenceFixtureModel.test_validators = [presence_validator(:name)]
+    CondPresenceFixtureModel.test_columns = [
+      Column.new('id', false, :integer),
+      Column.new('name', true, :string),
+      Column.new('created_at', false, :datetime),
+      Column.new('updated_at', false, :datetime),
+    ]
+
+    expected = <<~RBS.chomp
+      class ::CondPresenceFixtureModel::Validated
+        def id: () -> ::Integer
+        def name: () -> ::String
+        def created_at: () -> ::ActiveSupport::TimeWithZone
+        def updated_at: () -> ::ActiveSupport::TimeWithZone
       end
     RBS
     assert_equal expected, validated_marker
@@ -450,15 +523,15 @@ class ConditionalPresenceMarkersTest < Minitest::Test
     assert_equal [], postcondition_entries
   end
 
-  def test_postcondition_entries_empty_when_no_narrowable_attrs
+  def test_postcondition_entries_empty_when_only_polymorphic_validators_and_no_id
     CondPresenceFixtureModel.test_validators = [
-      presence_validator(:name),
-      presence_validator(:a, if_: :paid?),
+      presence_validator(:thing),
+      presence_validator(:other, if_: :paid?),
     ]
-    CondPresenceFixtureModel.test_columns = [
-      Column.new('name', false, :string),
-      Column.new('a', false, :string),
-    ]
+    CondPresenceFixtureModel.test_associations = {
+      thing: Association.new(:belongs_to, nil, true, { optional: true }),
+      other: Association.new(:belongs_to, nil, true, { optional: true }),
+    }
 
     assert_equal [], postcondition_entries
   end
