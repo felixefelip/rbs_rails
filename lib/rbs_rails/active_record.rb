@@ -42,7 +42,7 @@ module RbsRails
           # resolve-type-names: false
 
           #{header}
-            extend ::ActiveRecord::Base::ClassMethods[#{klass_name}, #{relation_class_name}, #{pk_type}]
+            extend ::ActiveRecord::Base::ClassMethods[#{klass_name}, #{relation_class_name}, #{pk_type}#{validated_model_arg}]
 
           #{columns}
           #{alias_columns}
@@ -60,6 +60,10 @@ module RbsRails
           #{relation_decl}
 
           #{collection_proxy_decl}
+
+          #{validated_marker}
+
+          #{conditional_presence_markers}
 
           #{footer}
 
@@ -98,7 +102,7 @@ module RbsRails
           class #{relation_class_name} < ::ActiveRecord::Relation
             include ::Enumerable[#{klass_name}]
             include #{generated_relation_methods_name}
-            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}]
+            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}#{validated_model_arg}]
           end
         RBS
       end
@@ -108,7 +112,7 @@ module RbsRails
           class #{klass_name}::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
             include ::Enumerable[#{klass_name}]
             include #{generated_relation_methods_name}
-            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}]
+            include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}#{validated_model_arg}]
 
             def build: (?::ActiveRecord::Associations::CollectionProxy::_EachPair attributes) ?{ () -> untyped } -> #{klass_name}
                      | (::Array[::ActiveRecord::Associations::CollectionProxy::_EachPair] attributes) ?{ () -> untyped } -> ::Array[#{klass_name}]
@@ -218,13 +222,16 @@ module RbsRails
         klass.reflect_on_all_associations(:belongs_to).map do |a|
           @dependencies << a.klass.name unless a.polymorphic?
 
-          is_optional = a.options[:optional]
-
           type = a.polymorphic? ? 'untyped' : Util.module_name(a.klass)
           type_optional = optional(type)
+          # Always emit the nilable form on the model. `belongs_to` (non-
+          # optional) implicitly registers a `presence: true` validator, which
+          # the `Validated` marker picks up and narrows back to `Foo` —
+          # matching the lifecycle reality that a new record may not yet have
+          # the association set.
           # @type var methods: Array[String]
           methods = []
-          methods << "def #{a.name}: () -> #{is_optional ? type_optional : type}"
+          methods << "def #{a.name}: () -> #{type_optional}"
           methods << "def #{a.name}=: (#{type_optional}) -> #{type_optional}"
           methods << "def reload_#{a.name}: () -> #{type_optional}"
           if !a.polymorphic?
@@ -234,6 +241,181 @@ module RbsRails
           end
           methods.join("\n")
         end.join("\n")
+      end
+
+      # Emits one marker class per conditional `validates :*, presence: true`
+      # (keyed by the `if:`/`unless:` predicate). Markers are intended to be
+      # composed by intersection with the model type — `OrderImport &
+      # OrderImport::ValidatedAsShipment` — once a Steep extension wires
+      # boolean predicates to a postcondition refinement (see
+      # felixefelip/steep, postcondition refinement issue).
+      private def conditional_presence_markers #: String
+        conditional_presence_groups.filter_map do |(kind, predicate), attrs|
+          methods = narrowed_method_decls(attrs)
+          next if methods.empty?
+
+          marker = conditional_presence_marker_name(kind, predicate)
+          <<~RBS.chomp
+            class #{klass_name}::#{marker}
+              #{methods.join("\n  ")}
+            end
+          RBS
+        end.join("\n\n")
+      end
+
+      # Emits the `Validated` marker class with non-nilable getters for every
+      # attribute that AR guarantees on a persisted+validated record:
+      #
+      # 1. `id` (when the column exists) — assigned on insert.
+      # 2. Attributes covered by an *unconditional* `validates :*, presence: true`.
+      # 3. `created_at` / `updated_at` (when columns exist) — set automatically.
+      #
+      # Composed by intersection at finder return types (`Model &
+      # Model::Validated`) and on `update`/`save`/`valid?` truthy branches
+      # (issue felixefelip/steep, conditional postconditions).
+      private def validated_marker #: String
+        methods = narrowed_method_decls(validated_marker_attrs)
+        return "" if methods.empty?
+
+        <<~RBS.chomp
+          class #{klass_name}::Validated
+            #{methods.join("\n  ")}
+          end
+        RBS
+      end
+
+      # When the model has a `Validated` marker, pass it as the
+      # `ValidatedModel` type parameter to `Relation::Methods`,
+      # `Base::ClassMethods`, etc., so finders like `find`, `find_by!`,
+      # `first!`, `where.first`, …, return `Model & Model::Validated`.
+      # See the matching `ValidatedModel = Model` default in the
+      # gem_rbs_collection activerecord overrides.
+      private def validated_model_arg #: String
+        return "" if narrowed_method_decls(validated_marker_attrs).empty?
+
+        ", #{klass_name}::Validated"
+      end
+
+      # The attribute list that populates `Validated`. Order matters only
+      # for stable snapshot diffs: id first, then validated attrs, then
+      # timestamps last.
+      private def validated_marker_attrs #: Array[Symbol]
+        attrs = [] #: Array[Symbol]
+        attrs << :id if klass.columns.any? { |c| c.name == "id" }
+        attrs.concat(unconditional_presence_attrs)
+        %w[created_at updated_at].each do |ts|
+          attrs << ts.to_sym if klass.columns.any? { |c| c.name == ts }
+        end
+        attrs.uniq
+      end
+
+      # Returns the YAML-ready postcondition entries for this model. Each
+      # entry maps a method call (whose receiver is the model) to a `self`
+      # refinement to apply on the truthy/falsy branch. See
+      # `.steep_postconditions.yml` consumed by Steep.
+      #
+      # Returned as an Array of Hashes with string keys so the CLI can YAML.dump
+      # them without symbol-prefix noise.
+      def postcondition_entries #: Array[Hash[String, untyped]]
+        entries = [] #: Array[Hash[String, untyped]]
+        short_name = klass_name(abs: false)
+
+        if !narrowed_method_decls(unconditional_presence_attrs).empty?
+          target = "#{short_name} & #{short_name}::Validated"
+          VALIDATED_POSTCONDITION_METHODS.each do |method|
+            entries << {
+              "class" => short_name,
+              "method" => method,
+              "when_true" => { "self" => target },
+            }
+          end
+        end
+
+        conditional_presence_groups.each do |(kind, predicate), attrs|
+          next if narrowed_method_decls(attrs).empty?
+
+          marker = conditional_presence_marker_name(kind, predicate)
+          target = "#{short_name} & #{short_name}::#{marker}"
+          branch = kind == :if ? "when_true" : "when_false"
+
+          entries << {
+            "class" => short_name,
+            "method" => predicate.to_s,
+            branch => { "self" => target },
+          }
+        end
+
+        entries
+      end
+
+      # AR / AM methods that succeed only when all validations pass. Truthy
+      # return ⇒ the receiver is freshly validated, so `self` refines to
+      # `Model & Model::Validated`.
+      VALIDATED_POSTCONDITION_METHODS = %w[valid? save save! update update!]
+
+      # @rbs attrs: Array[Symbol]
+      private def narrowed_method_decls(attrs) #: Array[String]
+        attrs.uniq.filter_map do |attr|
+          narrowed = narrow_type_for(attr)
+          narrowed && "def #{attr}: () -> #{narrowed}"
+        end
+      end
+
+      private def conditional_presence_groups #: Hash[[Symbol, Symbol], Array[Symbol]]
+        # @type var groups: Hash[[Symbol, Symbol], Array[Symbol]]
+        groups = {}
+
+        klass.validators.each do |validator|
+          next unless validator.is_a?(::ActiveModel::Validations::PresenceValidator)
+
+          key = conditional_presence_key(validator)
+          next unless key
+
+          (groups[key] ||= []).concat(validator.attributes)
+        end
+
+        groups
+      end
+
+      private def unconditional_presence_attrs #: Array[Symbol]
+        attrs = [] #: Array[Symbol]
+
+        klass.validators.each do |validator|
+          next unless validator.is_a?(::ActiveModel::Validations::PresenceValidator)
+          next if validator.options[:if] || validator.options[:unless]
+
+          attrs.concat(validator.attributes)
+        end
+
+        attrs
+      end
+
+      private def conditional_presence_key(validator) #: [Symbol, Symbol]?
+        if (m = validator.options[:if]).is_a?(Symbol)
+          [:if, m]
+        elsif (m = validator.options[:unless]).is_a?(Symbol)
+          [:unless, m]
+        end
+      end
+
+      private def conditional_presence_marker_name(kind, predicate) #: String
+        base = predicate.to_s.chomp("?")
+        camelized = base.split("_").map(&:capitalize).join
+        prefix = kind == :if ? "ValidatedAs" : "ValidatedUnless"
+        "#{prefix}#{camelized}"
+      end
+
+      private def narrow_type_for(attr_name) #: String?
+        if (assoc = klass.reflect_on_association(attr_name)) && assoc.macro == :belongs_to
+          return nil if assoc.polymorphic?
+          @dependencies << assoc.klass.name
+          return Util.module_name(assoc.klass)
+        end
+
+        col = klass.columns.find { |c| c.name == attr_name.to_s }
+        return nil unless col
+
+        sql_type_to_class(col.type)
       end
 
       private def generated_association_methods #: String
@@ -541,11 +723,16 @@ module RbsRails
                          end
           end
           sql_class_name = col.type == :datetime ? '::Time' : sql_type_to_class(col.type)
-          # If the DB says the column can be null, we need `<type>?`
-          # ...but if the type is already `untyped` there's no point in writing `untyped?`
+          # All columns are typed as nilable in the model — including `null: false`
+          # ones, plus `id`/`created_at`/`updated_at`. This reflects the truth of
+          # AR's two-state lifecycle: `Model.new` instances have nil-valued
+          # fields until `save` runs. Non-nil narrowing for persisted/validated
+          # records lives in `Model::Validated`, which is composed by
+          # intersection at finder return types (`Model & Model::Validated`)
+          # and on `update`/`save` truthy branches (Steep postcondition issue).
           class_name_opt = (class_name == 'untyped') ? 'untyped' : optional(class_name)
-          column_type = col.null ? class_name_opt : class_name
-          sql_column_type = col.null ? optional(sql_class_name) : sql_class_name
+          column_type = class_name_opt
+          sql_column_type = (sql_class_name == 'untyped') ? 'untyped' : optional(sql_class_name)
           sig = <<~EOS
             def #{col.name}: () -> #{column_type}
             def #{col.name}=: (#{column_type}) -> #{column_type}
