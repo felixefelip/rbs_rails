@@ -65,6 +65,8 @@ module RbsRails
 
           #{conditional_presence_markers}
 
+          #{through_derived_markers}
+
           #{footer}
 
           #{dependencies.build}
@@ -320,32 +322,65 @@ module RbsRails
         entries = [] #: Array[Hash[String, untyped]]
         short_name = klass_name(abs: false)
 
-        if !narrowed_method_decls(unconditional_presence_attrs).empty?
-          target = "#{short_name} & #{short_name}::Validated"
-          VALIDATED_POSTCONDITION_METHODS.each do |method|
+        marker_descriptors.each do |descriptor|
+          target = "#{short_name} & #{short_name}::#{descriptor[:name]}"
+          descriptor[:triggers].each do |method, branch|
             entries << {
               "class" => short_name,
               "method" => method,
-              "when_true" => { "self" => target },
+              branch => { "self" => target },
             }
           end
+        end
+
+        entries.concat(through_postcondition_entries)
+
+        entries
+      end
+
+      # Enumerates the marker classes this model contributes a postcondition
+      # for, with the narrowable attrs each marker covers and the
+      # (method, branch) pairs that should refine to it. Used both by
+      # `postcondition_entries` locally and by *host* generators that derive
+      # markers through `has_one :x, through: :y` associations (issue #2).
+      #
+      # The `Validated` descriptor is only included when there is at least
+      # one *unconditional* presence validator with a narrowable attr —
+      # id-only / timestamps-only models still get the RBS marker class but
+      # no postcondition entries, mirroring pre-existing behavior.
+      def marker_descriptors #: Array[Hash[Symbol, untyped]]
+        descriptors = [] #: Array[Hash[Symbol, untyped]]
+
+        if !narrowed_method_decls(unconditional_presence_attrs).empty?
+          triggers = VALIDATED_POSTCONDITION_METHODS.map { |m| [m, "when_true"] }
+          descriptors << {
+            name: "Validated",
+            attrs: validated_marker_attrs,
+            triggers: triggers,
+          }
         end
 
         conditional_presence_groups.each do |(kind, predicate), attrs|
           next if narrowed_method_decls(attrs).empty?
 
           marker = conditional_presence_marker_name(kind, predicate)
-          target = "#{short_name} & #{short_name}::#{marker}"
           branch = kind == :if ? "when_true" : "when_false"
-
-          entries << {
-            "class" => short_name,
-            "method" => predicate.to_s,
-            branch => { "self" => target },
+          descriptors << {
+            name: marker,
+            attrs: attrs.uniq,
+            triggers: [[predicate.to_s, branch]],
           }
         end
 
-        entries
+        descriptors
+      end
+
+      # Same lookup as the private `narrow_type_for`, exposed publicly so a
+      # *host* generator can ask a *target* generator what type a given attr
+      # narrows to in this model's markers.
+      # @rbs attr_name: Symbol
+      def narrowed_type_for(attr_name) #: String?
+        narrow_type_for(attr_name)
       end
 
       # AR / AM methods that succeed only when all validations pass. Truthy
@@ -415,6 +450,135 @@ module RbsRails
         camelized = base.split("_").map(&:capitalize).join
         prefix = kind == :if ? "ValidatedAs" : "ValidatedUnless"
         "#{prefix}#{camelized}"
+      end
+
+      # ---------------------------------------------------------------------
+      # Through-derived markers (issue felixefelip/rbs_rails#2)
+      #
+      # When this model is a *host* with `has_one :x, through: :y`, and the
+      # *target* of `:y` carries a marker that narrows `:x`, mirror that
+      # marker on this model so a Steep `via_receiver` postcondition
+      # (felixefelip/steep#14) can refine the host as a side effect of
+      # narrowing the target.
+      #
+      # Example: `Order has_one :logistics_operator, through: :order_import`,
+      # and `OrderImport::ValidatedAsShipment` declares
+      # `logistics_operator: ::Company`. We emit
+      # `Order::ValidatedAsShipmentViaOrderImport` with the same narrowed
+      # decl, plus a sidecar entry that adds a `via_receiver` under
+      # `OrderImport#shipment?`'s `when_true`.
+      # ---------------------------------------------------------------------
+
+      # Returns the RBS for derived marker classes that this host model
+      # contributes, grouped so all attrs that share a (target marker,
+      # through assoc) pair land in the same Via* class.
+      private def through_derived_markers #: String
+        groups = through_derived_groups
+        return "" if groups.empty?
+
+        groups.map do |(_target_short, _marker_name, _via_assoc), info|
+          methods = info[:methods].values.join("\n  ")
+          <<~RBS.chomp
+            class #{klass_name}::#{info[:derived_name]}
+              #{methods}
+            end
+          RBS
+        end.join("\n\n")
+      end
+
+      # Sidecar entries this host contributes for `via_receiver` refinement.
+      # Each entry is keyed by the *target's* class/method; the CLI merges
+      # these with the target's own `self:` entry.
+      def through_postcondition_entries #: Array[Hash[String, untyped]]
+        groups = through_derived_groups
+        return [] if groups.empty?
+
+        host_short = klass_name(abs: false)
+        entries = [] #: Array[Hash[String, untyped]]
+
+        groups.each do |(target_short, _marker_name, via_assoc), info|
+          via = {
+            "through" => "#{host_short}##{via_assoc}",
+            "as" => "#{host_short} & #{host_short}::#{info[:derived_name]}",
+          }
+          info[:triggers].each do |method, branch|
+            entries << {
+              "class" => target_short,
+              "method" => method,
+              branch => { "via_receiver" => [via] },
+            }
+          end
+        end
+
+        entries
+      end
+
+      # Walks each qualifying through association and resolves the target's
+      # markers exactly once. Returns a hash keyed by
+      # [target_short_name, target_marker_name, through_assoc_name] with the
+      # per-derived-marker payload (derived class name, narrowed method
+      # decls, list of (method, branch) triggers). Memoized — both
+      # `through_derived_markers` and `through_postcondition_entries`
+      # consume it.
+      private def through_derived_groups #: Hash[Array[untyped], Hash[Symbol, untyped]]
+        return @through_derived_groups if defined?(@through_derived_groups)
+
+        groups = {} #: Hash[Array[untyped], Hash[Symbol, untyped]]
+        target_generators = {} #: Hash[Class, Generator]
+
+        through_associations.each do |refl|
+          target = refl.through_reflection&.klass
+          next unless target
+
+          source_attr = refl.source_reflection&.name
+          next unless source_attr
+
+          target_gen = target_generators[target] ||= Generator.new(target)
+          final_type = target_gen.narrowed_type_for(source_attr)
+          next unless final_type
+
+          via_assoc = refl.through_reflection.name
+          target_short = Util.module_name(target, abs: false)
+
+          target_gen.marker_descriptors.each do |descriptor|
+            next unless descriptor[:attrs].include?(source_attr)
+
+            key = [target_short, descriptor[:name], via_assoc]
+            info = groups[key] ||= {
+              derived_name: derived_marker_name(descriptor[:name], via_assoc),
+              methods: {},
+              triggers: descriptor[:triggers],
+            }
+            info[:methods][refl.name] ||= "def #{refl.name}: () -> #{final_type}"
+          end
+        end
+
+        @through_derived_groups = groups
+      end
+
+      # Returns the `has_one :x, through: :y` reflections on this model that
+      # qualify for derived-marker emission. Skips:
+      # - `has_many through:` (the receiver is a collection, not a single
+      #   target — there is no useful `via_receiver` chain through it);
+      # - polymorphic through reflections (target type undecided);
+      # - nested through (`:y` itself is `through:` something else —
+      #   Phase 3+ in the Steep narrowing).
+      private def through_associations #: Array[untyped]
+        klass.reflect_on_all_associations(:has_one).select do |a|
+          next false unless a.options[:through]
+          tr = a.through_reflection
+          next false unless tr
+          next false if tr.polymorphic?
+          next false if tr.options[:through]
+          true
+        end
+      end
+
+      # @rbs target_marker_name: String
+      # @rbs via_assoc: Symbol
+      private def derived_marker_name(target_marker_name, via_assoc) #: String
+        camelized = via_assoc.to_s.split("_").map(&:capitalize).join
+        "#{target_marker_name}Via#{camelized}"
       end
 
       private def narrow_type_for(attr_name) #: String?

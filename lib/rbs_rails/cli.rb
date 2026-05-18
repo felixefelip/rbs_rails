@@ -155,15 +155,61 @@ module RbsRails
     # Writes the aggregated `.steep_postconditions.yml` sidecar consumed by
     # Steep (felixefelip/steep, conditional postconditions). No-op if no
     # model produced any entry, so untouched projects don't get a stray file.
+    #
+    # Entries from different generators are merged by (class, method): the
+    # target's own `self:` refinement (emitted by the target generator) and
+    # any number of `via_receiver` refinements (emitted by host generators
+    # via `has_one :x, through: :y`, issue #2) collapse into one entry per
+    # predicate, with `via_receiver` arrays concatenated in a stable order.
     def generate_postconditions_sidecar #: void
       entries = @postcondition_entries
       return if entries.nil? || entries.empty?
 
-      sorted = entries.sort_by { |e| [e["class"], e["method"]] }
+      merged = merge_postcondition_entries(entries)
+      sorted = merged.sort_by { |e| [e["class"], e["method"]] }
 
       path = config.signature_root_dir.join(".steep_postconditions.yml")
       path.dirname.mkpath
       Util::FileWriter.new(path).write(YAML.dump("postconditions" => sorted))
+    end
+
+    # Collapses entries with the same (class, method): combines per-branch
+    # bodies (`when_true`/`when_false`) so `self:` from the target meets
+    # `via_receiver:` from each host. First-wins on `self` if two generators
+    # somehow emit it (target should be the only source).
+    # @rbs entries: Array[Hash[String, untyped]]
+    private def merge_postcondition_entries(entries) #: Array[Hash[String, untyped]]
+      merged = {} #: Hash[[String, String], Hash[String, untyped]]
+
+      entries.each do |entry|
+        key = [entry["class"], entry["method"]]
+        slot = merged[key] ||= { "class" => entry["class"], "method" => entry["method"] }
+
+        %w[when_true when_false].each do |branch|
+          body = entry[branch]
+          next unless body
+
+          slot_branch = slot[branch] ||= {}
+
+          if body["self"]
+            slot_branch["self"] ||= body["self"]
+          end
+
+          if (vias = body["via_receiver"])
+            slot_branch["via_receiver"] ||= []
+            slot_branch["via_receiver"].concat(vias)
+          end
+        end
+      end
+
+      merged.each_value do |entry|
+        %w[when_true when_false].each do |branch|
+          vias = entry[branch]&.dig("via_receiver")
+          vias.sort_by! { |v| [v["through"].to_s, v["as"].to_s] }.uniq! if vias
+        end
+      end
+
+      merged.values
     end
 
     def generate_path_helpers #: void

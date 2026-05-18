@@ -39,6 +39,58 @@ end
 class CondPresenceFixtureTarget
 end
 
+# Fixtures for the through-derived marker tests (issue
+# felixefelip/rbs_rails#2). Top-level so `Util.module_name` produces the
+# bare `ThroughFixtureHost` / `ThroughFixtureTarget` names — nesting them
+# inside the test class would produce dotted RBS names.
+ThroughReflection = Struct.new(
+  :macro, :name, :klass, :options, :through_reflection, :source_reflection
+) do
+  def polymorphic?; false; end
+end
+
+SimpleReflection = Struct.new(:macro, :name, :klass, :polymorphic_flag, :options) do
+  def polymorphic?; polymorphic_flag; end
+end
+
+class ThroughFixtureTarget
+  class << self
+    attr_accessor :test_validators, :test_columns, :test_associations
+
+    def validators; test_validators || []; end
+    def columns; test_columns || []; end
+
+    def reflect_on_association(name)
+      (test_associations || {})[name]
+    end
+
+    def reflect_on_all_associations(macro = nil)
+      assocs = (test_associations || {}).values
+      macro ? assocs.select { |a| a.macro == macro } : assocs
+    end
+  end
+end
+
+class ThroughFixtureHost
+  class << self
+    attr_accessor :test_associations
+
+    def validators; []; end
+    def columns; []; end
+
+    def reflect_on_association(name)
+      (test_associations || {})[name]
+    end
+
+    def reflect_on_all_associations(macro = nil)
+      assocs = (test_associations || {}).values
+      macro ? assocs.select { |a| a.macro == macro } : assocs
+    end
+  end
+end
+
+class ThroughFixtureFinalKlass; end
+
 class ConditionalPresenceMarkersTest < Minitest::Test
   Association = Struct.new(:macro, :klass, :polymorphic_flag, :options) do
     def polymorphic?
@@ -560,5 +612,302 @@ class ConditionalPresenceMarkersTest < Minitest::Test
       entries.any? { |e| VALIDATED_METHODS.include?(e["method"]) },
       "no Validated postconditions when there are no unconditional presence validators"
     )
+  end
+
+  # -------------------------------------------------------------------
+  # Through-derived markers (issue felixefelip/rbs_rails#2)
+  #
+  # When this model is a *host* with `has_one :x, through: :y`, and the
+  # *target* of `:y` carries a marker that narrows `:x`, the generator
+  # mirrors that marker on the host as `MarkerNameViaY` and emits a
+  # `via_receiver` sidecar entry.
+  # -------------------------------------------------------------------
+
+  def teardown_through_fixtures
+    ThroughFixtureTarget.test_validators = nil
+    ThroughFixtureTarget.test_columns = nil
+    ThroughFixtureTarget.test_associations = nil
+    ThroughFixtureHost.test_associations = nil
+  end
+
+  # Build a `has_one :source_name, through: :through_name` reflection on the
+  # host pointing through `target_klass` to the named source attr.
+  # @return ThroughReflection
+  def build_through(name:, through_name:, target_klass:, source_name:)
+    through_ref = SimpleReflection.new(:belongs_to, through_name, target_klass, false, {})
+    source_ref  = SimpleReflection.new(:belongs_to, source_name, nil, false, {})
+    ThroughReflection.new(:has_one, name, ThroughFixtureFinalKlass, { through: through_name }, through_ref, source_ref)
+  end
+
+  def host_generator
+    RbsRails::ActiveRecord::Generator.new(ThroughFixtureHost)
+  end
+
+  def through_derived_markers
+    host_generator.send(:through_derived_markers)
+  end
+
+  def host_postcondition_entries
+    host_generator.postcondition_entries
+  end
+
+  def test_through_derived_marker_for_conditional_target_marker
+    ThroughFixtureTarget.test_validators = [
+      presence_validator(:logistics_operator, if_: :shipment?)
+    ]
+    ThroughFixtureTarget.test_associations = {
+      logistics_operator: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true })
+    }
+    ThroughFixtureHost.test_associations = {
+      logistics_operator: build_through(
+        name: :logistics_operator,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :logistics_operator
+      )
+    }
+
+    expected = <<~RBS.chomp
+      class ::ThroughFixtureHost::ValidatedAsShipmentViaOrderImport
+        def logistics_operator: () -> ::ThroughFixtureFinalKlass
+      end
+    RBS
+    assert_equal expected, through_derived_markers
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_through_postcondition_entries_attach_via_receiver_for_target_predicate
+    ThroughFixtureTarget.test_validators = [
+      presence_validator(:logistics_operator, if_: :shipment?)
+    ]
+    ThroughFixtureTarget.test_associations = {
+      logistics_operator: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true })
+    }
+    ThroughFixtureHost.test_associations = {
+      logistics_operator: build_through(
+        name: :logistics_operator,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :logistics_operator
+      )
+    }
+
+    entries = host_postcondition_entries
+    via_entry = entries.detect { |e| e["class"] == "ThroughFixtureTarget" && e["method"] == "shipment?" }
+
+    refute_nil via_entry, "expected a via_receiver entry keyed on the target predicate"
+    assert_equal(
+      {
+        "via_receiver" => [
+          {
+            "through" => "ThroughFixtureHost#order_import",
+            "as" => "ThroughFixtureHost & ThroughFixtureHost::ValidatedAsShipmentViaOrderImport",
+          }
+        ]
+      },
+      via_entry["when_true"]
+    )
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_through_derived_marker_for_unconditional_validated_marker
+    # Target has an unconditional presence validator on the source attr → it
+    # contributes a `Validated` marker. The derived marker is `ValidatedViaY`
+    # and is triggered by the standard valid?/save/update set.
+    ThroughFixtureTarget.test_validators = [
+      presence_validator(:logistics_operator)
+    ]
+    ThroughFixtureTarget.test_associations = {
+      logistics_operator: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true })
+    }
+    ThroughFixtureHost.test_associations = {
+      logistics_operator: build_through(
+        name: :logistics_operator,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :logistics_operator
+      )
+    }
+
+    expected = <<~RBS.chomp
+      class ::ThroughFixtureHost::ValidatedViaOrderImport
+        def logistics_operator: () -> ::ThroughFixtureFinalKlass
+      end
+    RBS
+    assert_equal expected, through_derived_markers
+
+    entries = host_postcondition_entries.select { |e| e["class"] == "ThroughFixtureTarget" }
+    methods = entries.map { |e| e["method"] }.sort
+    assert_equal %w[save save! update update! valid?], methods
+    entries.each do |entry|
+      assert_equal(
+        [{
+          "through" => "ThroughFixtureHost#order_import",
+          "as" => "ThroughFixtureHost & ThroughFixtureHost::ValidatedViaOrderImport",
+        }],
+        entry["when_true"]["via_receiver"]
+      )
+    end
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_through_unless_predicate_uses_when_false_branch
+    ThroughFixtureTarget.test_validators = [
+      presence_validator(:logistics_operator, unless_: :no_shipment?)
+    ]
+    ThroughFixtureTarget.test_associations = {
+      logistics_operator: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true })
+    }
+    ThroughFixtureHost.test_associations = {
+      logistics_operator: build_through(
+        name: :logistics_operator,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :logistics_operator
+      )
+    }
+
+    entry = host_postcondition_entries.detect { |e| e["method"] == "no_shipment?" }
+    refute_nil entry
+    assert_nil entry["when_true"]
+    refute_nil entry["when_false"]
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_through_marker_empty_when_target_has_no_narrowing_on_source
+    # Target has a presence validator, but on a *different* attr — no
+    # narrowing for the source attr → no derived marker on the host.
+    ThroughFixtureTarget.test_validators = [
+      presence_validator(:other_field, if_: :shipment?)
+    ]
+    ThroughFixtureTarget.test_columns = [Column.new('other_field', true, :string)]
+    ThroughFixtureHost.test_associations = {
+      logistics_operator: build_through(
+        name: :logistics_operator,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :logistics_operator
+      )
+    }
+
+    assert_equal '', through_derived_markers
+    assert_empty host_postcondition_entries.select { |e| e["class"] == "ThroughFixtureTarget" }
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_through_marker_skipped_when_target_has_no_markers
+    # Target has no validators → no markers → nothing for the host to derive.
+    ThroughFixtureHost.test_associations = {
+      logistics_operator: build_through(
+        name: :logistics_operator,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :logistics_operator
+      )
+    }
+
+    assert_equal '', through_derived_markers
+    assert_empty host_postcondition_entries
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_no_through_associations_emits_empty_string
+    ThroughFixtureHost.test_associations = {}
+
+    assert_equal '', through_derived_markers
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_has_many_through_is_ignored
+    # Has-many through has no single-receiver `via_receiver` chain (the
+    # intermediate is a CollectionProxy), so the generator skips it.
+    ThroughFixtureTarget.test_validators = [
+      presence_validator(:logistics_operator, if_: :shipment?)
+    ]
+    ThroughFixtureTarget.test_associations = {
+      logistics_operator: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true })
+    }
+    refl = build_through(
+      name: :logistics_operators,
+      through_name: :order_imports,
+      target_klass: ThroughFixtureTarget,
+      source_name: :logistics_operator
+    )
+    # Force the macro to has_many — the generator should skip.
+    has_many_refl = ThroughReflection.new(
+      :has_many, refl.name, refl.klass, refl.options, refl.through_reflection, refl.source_reflection
+    )
+    ThroughFixtureHost.test_associations = { logistics_operators: has_many_refl }
+
+    assert_equal '', through_derived_markers
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_nested_through_is_skipped
+    # When the through reflection is itself a `through:` (multi-hop), the
+    # generator skips. Steep Phase 2's `via_receiver` only handles a single
+    # hop; nested would need Phase 3+.
+    ThroughFixtureTarget.test_validators = [
+      presence_validator(:logistics_operator, if_: :shipment?)
+    ]
+    ThroughFixtureTarget.test_associations = {
+      logistics_operator: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true })
+    }
+    nested_through = SimpleReflection.new(:has_one, :order_import, ThroughFixtureTarget, false, { through: :something_else })
+    source_ref = SimpleReflection.new(:belongs_to, :logistics_operator, nil, false, {})
+    refl = ThroughReflection.new(:has_one, :logistics_operator, ThroughFixtureFinalKlass, { through: :order_import }, nested_through, source_ref)
+    ThroughFixtureHost.test_associations = { logistics_operator: refl }
+
+    assert_equal '', through_derived_markers
+  ensure
+    teardown_through_fixtures
+  end
+
+  def test_multiple_sources_via_same_through_assoc_share_one_derived_marker
+    # Target has two attrs narrowed by the same marker (ValidatedAsShipment
+    # via if: :shipment?). Host has two through-assocs that share the same
+    # `through:`. Both narrowed decls land in the same Via* class.
+    ThroughFixtureTarget.test_validators = [
+      presence_validator([:logistics_operator, :carrier], if_: :shipment?)
+    ]
+    ThroughFixtureTarget.test_associations = {
+      logistics_operator: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true }),
+      carrier: Association.new(:belongs_to, ThroughFixtureFinalKlass, false, { optional: true }),
+    }
+    ThroughFixtureHost.test_associations = {
+      logistics_operator: build_through(
+        name: :logistics_operator,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :logistics_operator
+      ),
+      carrier: build_through(
+        name: :carrier,
+        through_name: :order_import,
+        target_klass: ThroughFixtureTarget,
+        source_name: :carrier
+      ),
+    }
+
+    expected = <<~RBS.chomp
+      class ::ThroughFixtureHost::ValidatedAsShipmentViaOrderImport
+        def logistics_operator: () -> ::ThroughFixtureFinalKlass
+        def carrier: () -> ::ThroughFixtureFinalKlass
+      end
+    RBS
+    assert_equal expected, through_derived_markers
+
+    via_entries = host_postcondition_entries.select { |e| e["class"] == "ThroughFixtureTarget" && e["method"] == "shipment?" }
+    assert_equal 1, via_entries.size, "the host should emit a single entry per (target, predicate); the via_receiver array stays single-element here"
+  ensure
+    teardown_through_fixtures
   end
 end
