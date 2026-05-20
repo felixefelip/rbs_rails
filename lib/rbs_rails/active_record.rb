@@ -324,11 +324,24 @@ module RbsRails
 
         marker_descriptors.each do |descriptor|
           target = "#{short_name} & #{short_name}::#{descriptor[:name]}"
-          descriptor[:triggers].each do |method, branch|
+          drop_name = "#{short_name}::#{descriptor[:name]}"
+
+          descriptor[:triggers].each do |trigger|
+            method, branch, action = trigger
+            action ||= :self # backward compat for 2-element triggers
+
+            body =
+              case action
+              when :drops
+                { "drops" => [drop_name] }
+              else
+                { "self" => target }
+              end
+
             entries << {
               "class" => short_name,
               "method" => method,
-              branch => { "self" => target },
+              branch => body,
             }
           end
         end
@@ -352,11 +365,18 @@ module RbsRails
         descriptors = [] #: Array[Hash[Symbol, untyped]]
 
         if !narrowed_method_decls(unconditional_presence_attrs).empty?
-          triggers = VALIDATED_POSTCONDITION_METHODS.map { |m| [m, "when_true"] }
+          # `when_true.self` for every validated method (intersection narrows
+          # to `Model & Validated`). For the subset that returns false on
+          # failure (`save`, `update`, `valid?`), also emit `when_false.drops`
+          # so the marker is removed in the else branch — see
+          # felixefelip/steep#29 (intersection alone can't drop a marker).
+          self_triggers = VALIDATED_POSTCONDITION_METHODS.map { |m| [m, "when_true", :self] }
+          drop_triggers = DROPS_POSTCONDITION_METHODS.map { |m| [m, "when_false", :drops] }
+
           descriptors << {
             name: "Validated",
             attrs: validated_marker_attrs,
-            triggers: triggers,
+            triggers: self_triggers + drop_triggers,
           }
         end
 
@@ -368,7 +388,7 @@ module RbsRails
           descriptors << {
             name: marker,
             attrs: attrs.uniq,
-            triggers: [[predicate.to_s, branch]],
+            triggers: [[predicate.to_s, branch, :self]],
           }
         end
 
@@ -387,6 +407,18 @@ module RbsRails
       # return ⇒ the receiver is freshly validated, so `self` refines to
       # `Model & Model::Validated`.
       VALIDATED_POSTCONDITION_METHODS = %w[valid? save save! update update!]
+
+      # Subset of `VALIDATED_POSTCONDITION_METHODS` that has a meaningful
+      # *false* return — i.e., predicates that signal failure by
+      # returning false rather than raising. `save!` / `update!` are
+      # excluded because they raise on failure (no falsy path).
+      #
+      # For these methods, when the call returns false we emit
+      # `when_false: { drops: ["Model::Validated"] }` so Steep removes
+      # the `Validated` marker from the receiver in the else branch
+      # (felixefelip/steep#29). Intersection alone in `when_false.self`
+      # couldn't drop a marker; `drops:` does it explicitly.
+      DROPS_POSTCONDITION_METHODS = %w[valid? save update]
 
       # @rbs attrs: Array[Symbol]
       private def narrowed_method_decls(attrs) #: Array[String]
@@ -501,7 +533,17 @@ module RbsRails
             "through" => "#{host_short}##{via_assoc}",
             "as" => "#{host_short} & #{host_short}::#{info[:derived_name]}",
           }
-          info[:triggers].each do |method, branch|
+          info[:triggers].each do |trigger|
+            method, branch, action = trigger
+            # `via_receiver` is an intersection-only mechanism (the
+            # host's association type narrows when the inner predicate
+            # fires). It doesn't compose with `drops:` (which is
+            # subtraction on the *inner* type) — so we skip the drop
+            # triggers when emitting through-derived entries. The
+            # target's own generator already emits the `drops:` for
+            # the inner type.
+            next if action == :drops
+
             entries << {
               "class" => target_short,
               "method" => method,

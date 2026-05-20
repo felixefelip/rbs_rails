@@ -508,6 +508,7 @@ class ConditionalPresenceMarkersTest < Minitest::Test
   # -------------------------------------------------------------------
 
   VALIDATED_METHODS = %w[valid? save save! update update!]
+  DROPS_METHODS = %w[valid? save update]  # subset with a falsy branch
 
   def postcondition_entries
     RbsRails::ActiveRecord::Generator
@@ -519,14 +520,42 @@ class ConditionalPresenceMarkersTest < Minitest::Test
     CondPresenceFixtureModel.test_validators = [presence_validator(:name)]
     CondPresenceFixtureModel.test_columns = [Column.new('name', true, :string)]
 
-    expected = VALIDATED_METHODS.map do |m|
+    self_entries = VALIDATED_METHODS.map do |m|
       {
         "class" => "CondPresenceFixtureModel",
         "method" => m,
         "when_true" => { "self" => "CondPresenceFixtureModel & CondPresenceFixtureModel::Validated" },
       }
     end
-    assert_equal expected, postcondition_entries
+
+    # felixefelip/steep#29: predicates that return false on failure
+    # also emit a `when_false.drops:` entry — the validation marker
+    # is removed in the else branch.
+    drops_entries = DROPS_METHODS.map do |m|
+      {
+        "class" => "CondPresenceFixtureModel",
+        "method" => m,
+        "when_false" => { "drops" => ["CondPresenceFixtureModel::Validated"] },
+      }
+    end
+
+    assert_equal self_entries + drops_entries, postcondition_entries
+  end
+
+  def test_postcondition_entries_drops_only_for_predicates_with_falsy_return
+    # `save!` and `update!` raise on failure — no falsy path, so no
+    # `when_false.drops:` entry.
+    CondPresenceFixtureModel.test_validators = [presence_validator(:name)]
+    CondPresenceFixtureModel.test_columns = [Column.new('name', true, :string)]
+
+    drops_methods = postcondition_entries
+                      .select { |e| e["when_false"]&.key?("drops") }
+                      .map { |e| e["method"] }
+                      .sort
+
+    assert_equal %w[save update valid?], drops_methods
+    refute_includes drops_methods, "save!"
+    refute_includes drops_methods, "update!"
   end
 
   def test_postcondition_entries_layer_b_if_predicate_uses_when_true
@@ -572,10 +601,16 @@ class ConditionalPresenceMarkersTest < Minitest::Test
     ]
 
     entries = postcondition_entries
-    assert_equal VALIDATED_METHODS.length + 1, entries.length
+    # Layer A: VALIDATED methods with when_true.self + DROPS subset
+    # with when_false.drops. Layer B: one entry for the `if:`
+    # predicate.
+    assert_equal VALIDATED_METHODS.length + DROPS_METHODS.length + 1, entries.length
 
-    layer_a = entries.select { |e| e["when_true"]&.fetch("self") == "CondPresenceFixtureModel & CondPresenceFixtureModel::Validated" }
+    layer_a = entries.select { |e| e["when_true"]&.fetch("self", nil) == "CondPresenceFixtureModel & CondPresenceFixtureModel::Validated" }
     assert_equal VALIDATED_METHODS.sort, layer_a.map { |e| e["method"] }.sort
+
+    drops_layer = entries.select { |e| e["when_false"]&.fetch("drops", nil) == ["CondPresenceFixtureModel::Validated"] }
+    assert_equal DROPS_METHODS.sort, drops_layer.map { |e| e["method"] }.sort
 
     layer_b = entries.detect { |e| e["method"] == "paid?" }
     assert_equal(

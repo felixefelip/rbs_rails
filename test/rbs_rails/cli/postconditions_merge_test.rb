@@ -137,4 +137,66 @@ class PostconditionsMergeTest < Minitest::Test
     merged = merge(entries)
     assert_equal "Dup & Dup::First", merged[0]["when_true"]["self"]
   end
+
+  # ---- felixefelip/steep#29: `drops:` field --------------------------------
+
+  def test_combines_self_when_true_and_drops_when_false_for_same_key
+    # The typical `save`/`update`/`valid?` shape: truthy carries the
+    # `self:` intersection, falsy carries the `drops:` subtraction.
+    # Merge collapses the two emissions into a single entry.
+    entries = [
+      { "class" => "User", "method" => "save",
+        "when_true" => { "self" => "User & User::Validated" } },
+      { "class" => "User", "method" => "save",
+        "when_false" => { "drops" => ["User::Validated"] } }
+    ]
+
+    assert_equal(
+      [{
+        "class" => "User", "method" => "save",
+        "when_true" => { "self" => "User & User::Validated" },
+        "when_false" => { "drops" => ["User::Validated"] }
+      }],
+      merge(entries)
+    )
+  end
+
+  def test_concats_drops_from_multiple_emitters
+    entries = [
+      { "class" => "X", "method" => "ok?",
+        "when_false" => { "drops" => ["X::A"] } },
+      { "class" => "X", "method" => "ok?",
+        "when_false" => { "drops" => ["X::B"] } }
+    ]
+
+    merged = merge(entries)
+    assert_equal 1, merged.size
+    assert_equal ["X::A", "X::B"], merged[0]["when_false"]["drops"]
+  end
+
+  def test_dedups_and_sorts_drops_within_a_branch
+    entries = [
+      { "class" => "X", "method" => "ok?",
+        "when_false" => { "drops" => ["X::Z", "X::A"] } },
+      { "class" => "X", "method" => "ok?",
+        "when_false" => { "drops" => ["X::A"] } }
+    ]
+
+    merged = merge(entries)
+    assert_equal ["X::A", "X::Z"], merged[0]["when_false"]["drops"]
+  end
+
+  def test_drops_coexist_with_via_receiver_in_same_branch
+    entries = [
+      { "class" => "X", "method" => "ok?",
+        "when_false" => { "drops" => ["X::Validated"] } },
+      { "class" => "X", "method" => "ok?",
+        "when_false" => { "via_receiver" => [{ "through" => "Host#x", "as" => "Host & Host::NotValidated" }] } }
+    ]
+
+    merged = merge(entries)
+    branch = merged[0]["when_false"]
+    assert_equal ["X::Validated"], branch["drops"]
+    assert_equal 1, branch["via_receiver"].size
+  end
 end

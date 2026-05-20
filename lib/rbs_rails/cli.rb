@@ -242,6 +242,16 @@ module RbsRails
             slot_branch["via_receiver"] ||= []
             slot_branch["via_receiver"].concat(vias)
           end
+
+          # `drops:` (felixefelip/steep#29) is additive across emitters
+          # — e.g., the target generator may drop `Validated` on
+          # `update.when_false`, and a host generator could drop a
+          # marker contributed via `through:` on the same predicate.
+          # Concat and dedup, similar to via_receiver.
+          if (drops = body["drops"])
+            slot_branch["drops"] ||= []
+            slot_branch["drops"].concat(drops)
+          end
         end
       end
 
@@ -249,6 +259,9 @@ module RbsRails
         %w[when_true when_false].each do |branch|
           vias = entry[branch]&.dig("via_receiver")
           vias.sort_by! { |v| [v["through"].to_s, v["as"].to_s] }.uniq! if vias
+
+          drops = entry[branch]&.dig("drops")
+          drops.sort!.uniq! if drops
         end
       end
 
