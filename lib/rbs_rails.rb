@@ -10,6 +10,7 @@ require_relative 'rbs_rails/active_record/enum'
 require_relative 'rbs_rails/active_record/scope'
 require_relative 'rbs_rails/path_helpers'
 require_relative 'rbs_rails/dependency_builder'
+require_relative 'rbs_rails/callbacks_generator'
 
 module RbsRails
   class Error < StandardError; end

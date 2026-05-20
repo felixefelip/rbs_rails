@@ -32,6 +32,7 @@ module RbsRails
           generate_models
           generate_path_helpers
           generate_postconditions_sidecar
+          generate_callbacks_sidecar
           0
         when "models"
           load_application
@@ -43,6 +44,10 @@ module RbsRails
           load_application
           load_config
           generate_path_helpers
+          0
+        when "callbacks"
+          load_config
+          generate_callbacks_sidecar
           0
         else
           $stdout.puts "Unknown command: #{subcommand}"
@@ -173,6 +178,44 @@ module RbsRails
       Util::FileWriter.new(path).write(YAML.dump("postconditions" => sorted))
     end
 
+    # Writes the `.steep_callbacks.yml` sidecar consumed by Steep
+    # (felixefelip/steep#27, `Steep::Callbacks`). Walks every `.rb` file
+    # under `app/controllers/`, runs `CallbacksGenerator` on each, and
+    # aggregates entries. No-op if no controller produces an entry, so
+    # untouched projects don't get a stray file.
+    def generate_callbacks_sidecar #: void
+      controllers_dir = controllers_root
+      return unless controllers_dir.exist?
+
+      entries = [] #: Array[Hash[String, untyped]]
+      Pathname.glob(controllers_dir.join("**/*.rb")).sort.each do |path|
+        source = path.read
+        gen = RbsRails::CallbacksGenerator.new(source: source, path: path.to_s)
+        entries.concat(gen.entries)
+      rescue StandardError => e
+        warn "[rbs_rails] failed to parse #{path}: #{e.class}: #{e.message}"
+      end
+
+      return if entries.empty?
+
+      sorted = entries.sort_by { |e| [e["class"], e["apply_postcondition_of"]] }
+
+      out_path = config.signature_root_dir.join(".steep_callbacks.yml")
+      out_path.dirname.mkpath
+      Util::FileWriter.new(out_path).write(
+        YAML.dump("version" => 1, "callbacks" => sorted)
+      )
+    end
+
+    # Default controllers root. Uses `Dir.pwd` so the standalone
+    # `callbacks` subcommand doesn't require loading the whole Rails
+    # app, and the CLI works the same whether `Rails.root` is set or
+    # not. Production users invoke `rbs_rails` from the project root,
+    # which is the same as `Rails.root` anyway.
+    private def controllers_root #: Pathname
+      Pathname(Dir.pwd).join("app/controllers")
+    end
+
     # Collapses entries with the same (class, method): combines per-branch
     # bodies (`when_true`/`when_false`) so `self:` from the target meets
     # `via_receiver:` from each host. First-wins on `self` if two generators
@@ -231,6 +274,7 @@ module RbsRails
                   all            Generate all RBS files
                   models         Generate RBS files for models
                   path_helpers   Generate RBS for Rails path helpers
+                  callbacks      Generate .steep_callbacks.yml from before_action declarations
 
           Options:
         BANNER
