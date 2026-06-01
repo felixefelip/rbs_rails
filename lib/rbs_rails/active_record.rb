@@ -351,6 +351,45 @@ module RbsRails
         entries
       end
 
+      # True when the model has a meaningful `Validated` marker — i.e. at
+      # least one unconditional presence validator narrows an attribute.
+      # id-only / timestamps-only models get the marker class but no
+      # narrowing, so refining `self` to it would be a no-op.
+      def has_validated_marker? #: bool
+        !narrowed_method_decls(unconditional_presence_attrs).empty?
+      end
+
+      # Returns `.steep_callbacks.yml` entries that refine `self` to
+      # `Model & Model::Validated` at the entry of this model's
+      # after-validation lifecycle callbacks (after_save, after_create, …).
+      #
+      # Sound because such callbacks only run once the record satisfies its
+      # validations, so inside e.g. `after_save :atualizar_calendario` a
+      # required `belongs_to` association is non-nil. Empty unless the model
+      # has a meaningful `Validated` marker. `source_path` is the model's
+      # source file (callback declarations are read from it via Prism).
+      #
+      # @rbs source_path: String?
+      def callback_entries(source_path) #: Array[Hash[String, untyped]]
+        return [] unless has_validated_marker?
+        return [] unless source_path && File.file?(source_path)
+
+        methods = ModelCallbacksGenerator.new(source: File.read(source_path)).callbacks_by_class[klass.name] || []
+        return [] if methods.empty?
+
+        short = klass_name(abs: false)
+        [
+          {
+            "class" => short,
+            "applies_self" => "#{short} & #{short}::Validated",
+            "runs_before" => methods.map(&:to_s)
+          }
+        ]
+      rescue StandardError => e
+        warn "[rbs_rails] failed to read callbacks for #{klass.name}: #{e.class}: #{e.message}"
+        []
+      end
+
       # Enumerates the marker classes this model contributes a postcondition
       # for, with the narrowable attrs each marker covers and the
       # (method, branch) pairs that should refine to it. Used both by

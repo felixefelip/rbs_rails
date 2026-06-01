@@ -103,6 +103,7 @@ module RbsRails
       Rails.application.eager_load!
 
       @postcondition_entries = [] #: Array[Hash[String, untyped]]
+      @callback_entries = [] #: Array[Hash[String, untyped]]
 
       ::ActiveRecord::Base.descendants.each do |klass|
         generate_single_model(klass)
@@ -146,6 +147,7 @@ module RbsRails
       Util::FileWriter.new(path).write generator.generate
 
       collect_postcondition_entries(generator)
+      collect_callback_entries(generator, original_path)
 
       true
     end
@@ -155,6 +157,14 @@ module RbsRails
       return unless @postcondition_entries
 
       @postcondition_entries.concat(generator.postcondition_entries)
+    end
+
+    # @rbs generator: RbsRails::ActiveRecord::Generator
+    # @rbs source_path: String?
+    private def collect_callback_entries(generator, source_path) #: void
+      return unless @callback_entries
+
+      @callback_entries.concat(generator.callback_entries(source_path))
     end
 
     # Writes the aggregated `.steep_postconditions.yml` sidecar consumed by
@@ -179,26 +189,35 @@ module RbsRails
     end
 
     # Writes the `.steep_callbacks.yml` sidecar consumed by Steep
-    # (felixefelip/steep#27, `Steep::Callbacks`). Walks every `.rb` file
-    # under `app/controllers/`, runs `CallbacksGenerator` on each, and
-    # aggregates entries. No-op if no controller produces an entry, so
-    # untouched projects don't get a stray file.
+    # (felixefelip/steep#27, `Steep::Callbacks`). Aggregates two sources:
+    #   - controller `before_action` callbacks, by walking every `.rb` under
+    #     `app/controllers/` with `CallbacksGenerator` (`apply_postcondition_of`
+    #     entries);
+    #   - model after-validation callbacks collected during `generate_models`
+    #     (`applies_self` entries refining `self` to `Model::Validated`).
+    # No-op if neither source produces an entry, so untouched projects don't
+    # get a stray file.
     def generate_callbacks_sidecar #: void
-      controllers_dir = controllers_root
-      return unless controllers_dir.exist?
-
       entries = [] #: Array[Hash[String, untyped]]
-      Pathname.glob(controllers_dir.join("**/*.rb")).sort.each do |path|
-        source = path.read
-        gen = RbsRails::CallbacksGenerator.new(source: source, path: path.to_s)
-        entries.concat(gen.entries)
-      rescue StandardError => e
-        warn "[rbs_rails] failed to parse #{path}: #{e.class}: #{e.message}"
+
+      controllers_dir = controllers_root
+      if controllers_dir.exist?
+        Pathname.glob(controllers_dir.join("**/*.rb")).sort.each do |path|
+          source = path.read
+          gen = RbsRails::CallbacksGenerator.new(source: source, path: path.to_s)
+          entries.concat(gen.entries)
+        rescue StandardError => e
+          warn "[rbs_rails] failed to parse #{path}: #{e.class}: #{e.message}"
+        end
       end
+
+      entries.concat(@callback_entries) if @callback_entries
 
       return if entries.empty?
 
-      sorted = entries.sort_by { |e| [e["class"], e["apply_postcondition_of"]] }
+      sorted = entries.sort_by do |e|
+        [e["class"].to_s, e["apply_postcondition_of"].to_s, e["applies_self"].to_s]
+      end
 
       out_path = config.signature_root_dir.join(".steep_callbacks.yml")
       out_path.dirname.mkpath

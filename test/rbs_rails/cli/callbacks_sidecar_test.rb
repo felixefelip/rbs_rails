@@ -141,6 +141,62 @@ class CallbacksSidecarTest < Minitest::Test
     end
   end
 
+  def test_merges_model_applies_self_entries_with_controllers
+    with_tmp_project do |dir|
+      configure_sidecar_dir(dir)
+
+      File.write("app/controllers/posts_controller.rb", <<~RUBY)
+        class PostsController < ApplicationController
+          before_action :set_post, only: [:show]
+          def show; end
+        end
+      RUBY
+
+      cli = RbsRails::CLI.new
+      cli.instance_variable_set(:@callback_entries, [
+        {
+          "class" => "Dose",
+          "applies_self" => "Dose & Dose::Validated",
+          "runs_before" => ["atualizar_calendario"]
+        }
+      ])
+      cli.send(:generate_callbacks_sidecar)
+
+      payload = YAML.safe_load(sidecar_path.read)
+      entries = payload["callbacks"]
+      assert_equal 2, entries.size
+
+      controller = entries.find { |e| e["class"] == "PostsController" }
+      assert_equal "set_post", controller["apply_postcondition_of"]
+
+      model = entries.find { |e| e["class"] == "Dose" }
+      assert_equal "Dose & Dose::Validated", model["applies_self"]
+      assert_equal ["atualizar_calendario"], model["runs_before"]
+      refute model.key?("apply_postcondition_of")
+    end
+  end
+
+  def test_emits_model_only_sidecar_without_controllers
+    with_tmp_project do |dir|
+      configure_sidecar_dir(dir)
+
+      cli = RbsRails::CLI.new
+      cli.instance_variable_set(:@callback_entries, [
+        {
+          "class" => "Dose",
+          "applies_self" => "Dose & Dose::Validated",
+          "runs_before" => ["atualizar_calendario"]
+        }
+      ])
+      cli.send(:generate_callbacks_sidecar)
+
+      assert sidecar_path.file?, "expected sidecar with model-only entries"
+      payload = YAML.safe_load(sidecar_path.read)
+      assert_equal 1, payload["callbacks"].size
+      assert_equal "Dose & Dose::Validated", payload["callbacks"].first["applies_self"]
+    end
+  end
+
   def test_sorts_entries_for_stable_output
     with_tmp_project do |dir|
       configure_sidecar_dir(dir)
