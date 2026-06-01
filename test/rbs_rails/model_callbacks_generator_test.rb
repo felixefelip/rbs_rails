@@ -23,18 +23,21 @@ class ModelCallbacksGeneratorTest < Minitest::Test
     assert_equal({ "Dose" => [:atualizar_calendario] }, result)
   end
 
-  def test_collects_all_after_validation_lifecycle_callbacks
+  def test_collects_all_post_validation_lifecycle_callbacks
     result = by_class(<<~RUBY)
       class Foo < ApplicationRecord
         after_validation :a
-        after_create :b
-        after_update :c
-        after_commit :d
+        before_save :b
+        before_create :c
+        before_update :d
         after_save :e
+        after_create :f
+        after_update :g
+        after_commit :h
       end
     RUBY
 
-    assert_equal [:a, :b, :c, :d, :e], result["Foo"].sort
+    assert_equal [:a, :b, :c, :d, :e, :f, :g, :h], result["Foo"].sort
   end
 
   def test_collects_multiple_symbol_handlers_in_one_call
@@ -97,7 +100,7 @@ class ModelCallbacksGeneratorTest < Minitest::Test
     assert_empty result
   end
 
-  def test_ignores_before_validation_and_destroy_callbacks
+  def test_collects_before_save_family_but_ignores_before_validation_and_destroy
     result = by_class(<<~RUBY)
       class Foo < ApplicationRecord
         before_validation :normalize
@@ -106,7 +109,9 @@ class ModelCallbacksGeneratorTest < Minitest::Test
       end
     RUBY
 
-    assert_empty result
+    # before_save runs post-validation → collected; before_validation runs
+    # pre-validation and after_destroy doesn't establish the invariant → ignored.
+    assert_equal [:prepare], result["Foo"]
   end
 
   def test_handles_namespaced_and_nested_classes

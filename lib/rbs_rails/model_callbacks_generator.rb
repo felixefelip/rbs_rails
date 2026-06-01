@@ -8,20 +8,28 @@ module RbsRails
   #
   # Only callbacks that run AFTER the record's validations pass are emitted,
   # so refining `self` to `Model & Model::Validated` at the handler's entry is
-  # sound (the record is known to satisfy its presence validations):
+  # sound (the record is known to satisfy its presence validations). In the
+  # save lifecycle (before_validation → validate → after_validation →
+  # before_save → before_create/update → INSERT/UPDATE → after_create/update →
+  # after_save → after_commit), every callback except `before_validation` runs
+  # post-validation:
   #
-  #   after_validation, after_save, after_create, after_update, after_commit
+  #   after_validation, before_save, before_create, before_update,
+  #   after_create, after_update, after_save, after_commit
   #
   # Skipped (valid Rails the generator can't soundly translate, no warning):
   #   - conditional callbacks (`if:` / `unless:`)
   #   - block / proc / callable-object handlers (only literal Symbols)
   #
-  # `before_*`, `after_destroy`, and `*_rollback` callbacks are out of scope
-  # (V1) — `before_validation` runs pre-validation, and destroy/rollback do
-  # not establish the presence-validated invariant.
+  # Out of scope: `before_validation` (runs pre-validation), and
+  # `after_destroy` / `*_rollback` (don't establish the presence-validated
+  # invariant).
   class ModelCallbacksGenerator
     AFTER_VALIDATION_CALLBACKS = %i[
       after_validation
+      before_save
+      before_create
+      before_update
       after_save
       after_create
       after_update
