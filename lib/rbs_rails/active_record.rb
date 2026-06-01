@@ -253,7 +253,7 @@ module RbsRails
       # felixefelip/steep, postcondition refinement issue).
       private def conditional_presence_markers #: String
         conditional_presence_groups.filter_map do |(kind, predicate), attrs|
-          methods = narrowed_method_decls(attrs)
+          methods = narrowed_method_decls(attrs, decorate_validated_assoc: true)
           next if methods.empty?
 
           marker = conditional_presence_marker_name(kind, predicate)
@@ -276,7 +276,7 @@ module RbsRails
       # Model::Validated`) and on `update`/`save`/`valid?` truthy branches
       # (issue felixefelip/steep, conditional postconditions).
       private def validated_marker #: String
-        methods = narrowed_method_decls(validated_marker_attrs)
+        methods = narrowed_method_decls(validated_marker_attrs, decorate_validated_assoc: true)
         return "" if methods.empty?
 
         <<~RBS.chomp
@@ -460,9 +460,11 @@ module RbsRails
       DROPS_POSTCONDITION_METHODS = %w[valid? save update]
 
       # @rbs attrs: Array[Symbol]
-      private def narrowed_method_decls(attrs) #: Array[String]
+      # @rbs attrs: Array[Symbol]
+      # @rbs decorate_validated_assoc: bool
+      private def narrowed_method_decls(attrs, decorate_validated_assoc: false) #: Array[String]
         attrs.uniq.filter_map do |attr|
-          narrowed = narrow_type_for(attr)
+          narrowed = narrow_type_for(attr, decorate_validated_assoc: decorate_validated_assoc)
           narrowed && "def #{attr}: () -> #{narrowed}"
         end
       end
@@ -662,17 +664,41 @@ module RbsRails
         "#{target_marker_name}Via#{camelized}"
       end
 
-      private def narrow_type_for(attr_name) #: String?
+      # @rbs decorate_validated_assoc: bool
+      private def narrow_type_for(attr_name, decorate_validated_assoc: false) #: String?
         if (assoc = klass.reflect_on_association(attr_name)) && assoc.macro == :belongs_to
           return nil if assoc.polymorphic?
           @dependencies << assoc.klass.name
-          return Util.module_name(assoc.klass)
+          name = Util.module_name(assoc.klass)
+          # On a validated/persisted record a required belongs_to is itself a
+          # persisted (hence validated) record, so inside a `Validated` marker
+          # the association reader returns `Assoc & Assoc::Validated` — letting
+          # callers reach the association's own validated (non-nil) attributes.
+          if decorate_validated_assoc && assoc_has_validated_marker?(assoc.klass)
+            return "(#{name} & #{name}::Validated)"
+          end
+          return name
         end
 
         col = klass.columns.find { |c| c.name == attr_name.to_s }
         return nil unless col
 
         sql_type_to_class(col.type)
+      end
+
+      # Whether the associated model has a meaningful `Validated` marker. Built
+      # with the base (non-decorating) path so it never recurses back into
+      # `narrow_type_for(decorate_validated_assoc: true)`.
+      # @rbs assoc_klass: singleton(ActiveRecord::Base)
+      private def assoc_has_validated_marker?(assoc_klass) #: bool
+        return false unless RbsRails::ActiveRecord.generatable?(assoc_klass)
+
+        (@assoc_validated_marker_cache ||= {}).fetch(assoc_klass) do
+          @assoc_validated_marker_cache[assoc_klass] =
+            RbsRails::ActiveRecord::Generator.new(assoc_klass).has_validated_marker?
+        end
+      rescue StandardError
+        false
       end
 
       private def generated_association_methods #: String
