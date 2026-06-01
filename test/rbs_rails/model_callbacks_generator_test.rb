@@ -140,4 +140,84 @@ class ModelCallbacksGeneratorTest < Minitest::Test
 
     assert_empty result
   end
+
+  def test_includes_transitively_called_helper_methods
+    result = by_class(<<~RUBY)
+      class Foo < ApplicationRecord
+        before_save :calcular
+
+        def calcular
+          status = if done?
+            :a
+          else
+            :b
+          end
+        end
+
+        def done?
+          qtde >= total
+        end
+
+        def qtde
+          caderneta.qtde_por_vacina(vacina)
+        end
+
+        def total
+          vacina.count
+        end
+      end
+    RUBY
+
+    # calcular -> done? -> qtde, total. caderneta/vacina/qtde_por_vacina/count
+    # are not methods of Foo, so they are not followed.
+    assert_equal [:calcular, :done?, :qtde, :total], result["Foo"].sort
+  end
+
+  def test_follows_calls_through_safe_navigation_and_handles_cycles
+    result = by_class(<<~RUBY)
+      class Foo < ApplicationRecord
+        after_save :a
+
+        def a
+          b&.to_s
+          recurse
+        end
+
+        def b
+          recurse
+        end
+
+        def recurse
+          a
+        end
+      end
+    RUBY
+
+    # `b&.to_s` follows the receiver-less `b`; the a/recurse cycle terminates.
+    assert_equal [:a, :b, :recurse], result["Foo"].sort
+  end
+
+  def test_follows_self_calls_but_not_other_receivers
+    result = by_class(<<~RUBY)
+      class Foo < ApplicationRecord
+        before_save :calcular
+
+        def calcular
+          self.explicit   # explicit self → followed
+          implicit         # receiver-less → followed
+          vacina.count     # other receiver → not followed
+          Foo.helper       # class method → not followed
+        end
+
+        def explicit; end
+
+        def implicit; end
+
+        def self.helper; end
+      end
+    RUBY
+
+    # Both self.explicit and implicit are followed; vacina.* and Foo.* are not.
+    assert_equal [:calcular, :explicit, :implicit], result["Foo"].sort
+  end
 end

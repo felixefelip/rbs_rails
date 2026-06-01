@@ -44,7 +44,10 @@ module RbsRails
     end
 
     # Returns `Hash[full_class_name, Array[Symbol]]` mapping each class that
-    # declares after-validation callbacks to the handler method symbols.
+    # declares post-validation callbacks to the method symbols whose `self`
+    # should be narrowed to `Model::Validated` — the callback handlers plus the
+    # transitive closure of same-class instance methods they reach via
+    # implicit-self calls.
     def callbacks_by_class #: Hash[String, Array[Symbol]]
       tree = Prism.parse(@source).value
       result = {} #: Hash[String, Array[Symbol]]
@@ -82,16 +85,67 @@ module RbsRails
         else [body]
         end
 
-      methods = [] #: Array[Symbol]
+      roots = [] #: Array[Symbol]
+      defs = {} #: Hash[Symbol, Prism::DefNode]
       children.each do |child|
-        next unless child.is_a?(Prism::CallNode)
-        next unless child.receiver.nil?
-        next unless AFTER_VALIDATION_CALLBACKS.include?(child.name)
-
-        methods.concat(handler_symbols(child))
+        case child
+        when Prism::CallNode
+          if child.receiver.nil? && AFTER_VALIDATION_CALLBACKS.include?(child.name)
+            roots.concat(handler_symbols(child))
+          end
+        when Prism::DefNode
+          # Instance methods only (skip `def self.x`).
+          defs[child.name] = child if child.receiver.nil?
+        end
       end
 
-      result[full_name] = methods.uniq unless methods.empty?
+      return if roots.empty?
+
+      closure = transitive_self_call_closure(roots, defs)
+      result[full_name] = closure unless closure.empty?
+    end
+
+    # The callback narrows `self` to `Model::Validated` at the handler's entry,
+    # but a handler typically delegates to helper methods (`calcular_status` ->
+    # `tomou_todas_as_doses?` -> `qtde_doses_tomadas` -> ...). Each of those is
+    # type-checked with its own `self`, so without help the validated narrowing
+    # is lost one hop in. We therefore return the transitive closure of
+    # same-class instance methods reachable from the callback via implicit-self
+    # calls, so every method reachable from a post-validation callback gets the
+    # narrowing too. Methods not defined in this class (association readers,
+    # inherited helpers) are left as-is.
+    def transitive_self_call_closure(roots, defs)
+      visited = [] #: Array[Symbol]
+      queue = roots.dup #: Array[Symbol]
+
+      until queue.empty?
+        name = queue.shift
+        next if visited.include?(name)
+        visited << name
+
+        def_node = defs[name]
+        next unless def_node
+
+        self_calls_in(def_node.body).each do |callee|
+          queue << callee if defs.key?(callee) && !visited.include?(callee)
+        end
+      end
+
+      visited.uniq
+    end
+
+    # Names of self method calls anywhere within a node's subtree — both
+    # receiver-less sends (`foo`, `foo&.x`) and explicit `self.foo`. Calls with
+    # any other receiver (`vacina.count`, `Foo.bar`) are not self-calls and are
+    # left out.
+    def self_calls_in(node, acc = [])
+      return acc unless node.is_a?(Prism::Node)
+
+      if node.is_a?(Prism::CallNode) && (node.receiver.nil? || node.receiver.is_a?(Prism::SelfNode))
+        acc << node.name
+      end
+      node.compact_child_nodes.each { |child| self_calls_in(child, acc) }
+      acc
     end
 
     # Returns the literal Symbol handlers of a callback call, or `[]` if the
