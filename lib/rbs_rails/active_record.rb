@@ -378,16 +378,35 @@ module RbsRails
         return [] if methods.empty?
 
         short = klass_name(abs: false)
+        markers = ["#{short}::Validated", *validated_through_marker_fqns]
         [
           {
             "class" => short,
-            "applies_self" => "#{short} & #{short}::Validated",
+            "applies_self" => ([short] + markers).join(" & "),
             "runs_before" => methods.map(&:to_s)
           }
         ]
       rescue StandardError => e
         warn "[rbs_rails] failed to read callbacks for #{klass.name}: #{e.class}: #{e.message}"
         []
+      end
+
+      # Through-derived markers (`has_one :x, through: :y`, issue #2) that hold
+      # whenever the record is validated, so the callback narrowing can include
+      # them alongside `Validated`. A `ValidatedVia<Y>` marker holds when the
+      # through-intermediate `y` is present and validated — which is guaranteed
+      # in a validated record only when `y` is itself a required belongs_to
+      # (part of `Validated`) and the marker derives from the intermediate's
+      # base `Validated` (not a conditional `ValidatedAs*`). Returns the fully
+      # qualified marker names, e.g. `Caderneta::RecomendacaoVacina::ValidatedViaCaderneta`.
+      private def validated_through_marker_fqns #: Array[String]
+        short = klass_name(abs: false)
+        required = unconditional_presence_attrs
+        through_derived_groups.filter_map do |(_target_short, marker_name, via_assoc), info|
+          next unless marker_name == "Validated"
+          next unless required.include?(via_assoc)
+          "#{short}::#{info[:derived_name]}"
+        end.uniq
       end
 
       # Enumerates the marker classes this model contributes a postcondition

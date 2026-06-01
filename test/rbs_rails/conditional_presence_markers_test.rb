@@ -983,4 +983,28 @@ class ConditionalPresenceMarkersTest < Minitest::Test
   ensure
     teardown_through_fixtures
   end
+
+  # The callback `applies_self` should also include through-derived markers
+  # that hold whenever the record is validated: derived from the intermediate's
+  # base `Validated` marker (not a conditional `ValidatedAs*`) and reached
+  # through a required belongs_to (so the intermediate is present+validated).
+  def test_validated_through_marker_fqns_filters_to_sound_markers
+    gen = host_generator
+    groups = {
+      ["ThroughFixtureTarget", "Validated", :order_import] => { derived_name: "ValidatedViaOrderImport" },
+      # conditional target marker → not guaranteed by Validated → excluded
+      ["ThroughFixtureTarget", "ValidatedAsShipment", :order_import] => { derived_name: "ValidatedAsShipmentViaOrderImport" },
+      # through a non-required intermediate → may be absent when validated → excluded
+      ["ThroughFixtureTarget", "Validated", :optional_link] => { derived_name: "ValidatedViaOptionalLink" }
+    }
+
+    gen.stub(:through_derived_groups, groups) do
+      gen.stub(:unconditional_presence_attrs, [:order_import]) do
+        assert_equal(
+          ["ThroughFixtureHost::ValidatedViaOrderImport"],
+          gen.send(:validated_through_marker_fqns)
+        )
+      end
+    end
+  end
 end
