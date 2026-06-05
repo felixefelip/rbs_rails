@@ -413,6 +413,44 @@ class ConditionalPresenceMarkersTest < Minitest::Test
     end
   end
 
+  def test_validated_marker_decorates_has_one_under_explicit_presence_validation
+    # `has_one` has no automatic presence validation, so it only reaches the
+    # marker via an explicit `validates :assoc, presence: true` — and then
+    # the same logic as belongs_to applies: on a validated record the
+    # association is present and itself loaded from the DB (validated).
+    CondPresenceFixtureModel.test_validators = [presence_validator(:target)]
+    CondPresenceFixtureModel.test_associations = {
+      target: Association.new(:has_one, CondPresenceFixtureTarget, false, {})
+    }
+
+    gen = RbsRails::ActiveRecord::Generator.new(CondPresenceFixtureModel)
+    gen.stub(:assoc_has_validated_marker?, true) do
+      expected = <<~RBS.chomp
+        class ::CondPresenceFixtureModel::Validated
+          def target: () -> (::CondPresenceFixtureTarget & ::CondPresenceFixtureTarget::Validated)
+        end
+      RBS
+      assert_equal expected, gen.send(:validated_marker)
+    end
+  end
+
+  def test_validated_marker_leaves_has_one_plain_when_target_has_no_marker
+    CondPresenceFixtureModel.test_validators = [presence_validator(:target)]
+    CondPresenceFixtureModel.test_associations = {
+      target: Association.new(:has_one, CondPresenceFixtureTarget, false, {})
+    }
+
+    gen = RbsRails::ActiveRecord::Generator.new(CondPresenceFixtureModel)
+    gen.stub(:assoc_has_validated_marker?, false) do
+      expected = <<~RBS.chomp
+        class ::CondPresenceFixtureModel::Validated
+          def target: () -> ::CondPresenceFixtureTarget
+        end
+      RBS
+      assert_equal expected, gen.send(:validated_marker)
+    end
+  end
+
   def test_validated_marker_emitted_for_unconditional_presence_on_optional_belongs_to
     CondPresenceFixtureModel.test_validators = [presence_validator(:target)]
     CondPresenceFixtureModel.test_associations = {
