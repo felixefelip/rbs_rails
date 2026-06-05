@@ -685,14 +685,16 @@ module RbsRails
 
       # @rbs decorate_validated_assoc: bool
       private def narrow_type_for(attr_name, decorate_validated_assoc: false) #: String?
-        if (assoc = klass.reflect_on_association(attr_name)) && assoc.macro == :belongs_to
+        if (assoc = klass.reflect_on_association(attr_name)) && [:belongs_to, :has_one].include?(assoc.macro)
           return nil if assoc.polymorphic?
           @dependencies << assoc.klass.name
           name = Util.module_name(assoc.klass)
-          # On a validated/persisted record a required belongs_to is itself a
-          # persisted (hence validated) record, so inside a `Validated` marker
-          # the association reader returns `Assoc & Assoc::Validated` — letting
-          # callers reach the association's own validated (non-nil) attributes.
+          # On a validated/persisted record a presence-guaranteed association
+          # (required belongs_to, or a has_one under an explicit presence
+          # validation) is itself a persisted (hence validated) record, so
+          # inside a `Validated` marker the reader returns
+          # `Assoc & Assoc::Validated` — letting callers reach the
+          # association's own validated (non-nil) attributes.
           if decorate_validated_assoc && assoc_has_validated_marker?(assoc.klass)
             return "(#{name} & #{name}::Validated)"
           end
