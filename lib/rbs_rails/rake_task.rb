@@ -24,6 +24,7 @@ module RbsRails
 
       def_generate_rbs_for_models
       def_generate_rbs_for_path_helpers
+      def_generate_rbs_for_flash_helpers
       def_all
     end
 
@@ -58,6 +59,17 @@ module RbsRails
           sh "rbs_rails", "path_helpers", "--signature-root-dir=#{signature_root_dir}"
         else
           sh "rbs_rails", "path_helpers"
+        end
+      end
+    end
+
+    def def_generate_rbs_for_flash_helpers #: void
+      desc 'Generate RBS files for flash accessors (notice, alert, ...)'
+      task :"#{name}:generate_rbs_for_flash_helpers" do
+        if signature_root_dir
+          sh "rbs_rails", "flash_helpers", "--signature-root-dir=#{signature_root_dir}"
+        else
+          sh "rbs_rails", "flash_helpers"
         end
       end
     end

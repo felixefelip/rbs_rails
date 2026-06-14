@@ -31,6 +31,7 @@ module RbsRails
           load_config
           generate_models
           generate_path_helpers
+          generate_flash_helpers
           generate_postconditions_sidecar
           generate_callbacks_sidecar
           0
@@ -44,6 +45,11 @@ module RbsRails
           load_application
           load_config
           generate_path_helpers
+          0
+        when "flash_helpers"
+          load_application
+          load_config
+          generate_flash_helpers
           0
         when "callbacks"
           load_config
@@ -295,6 +301,14 @@ module RbsRails
       Util::FileWriter.new(path).write sig
     end
 
+    def generate_flash_helpers #: void
+      path = config.signature_root_dir.join 'flash_helpers.rbs'
+      path.dirname.mkpath
+
+      sig = RbsRails::FlashHelpers.generate
+      Util::FileWriter.new(path).write sig
+    end
+
     def create_option_parser #: OptionParser
       OptionParser.new do |opts|
         opts.banner = <<~BANNER
@@ -306,6 +320,7 @@ module RbsRails
                   all            Generate all RBS files
                   models         Generate RBS files for models
                   path_helpers   Generate RBS for Rails path helpers
+                  flash_helpers  Generate RBS for Rails flash accessors (notice, alert, ...)
                   callbacks      Generate .steep_callbacks.yml from before_action declarations
 
           Options:
