@@ -60,24 +60,60 @@ class ModelCallbacksGeneratorTest < Minitest::Test
     assert_equal [:notify], result["Foo"]
   end
 
-  def test_skips_conditional_if
+  # An `if:`/`unless:` condition only gates whether the callback runs, never
+  # moving it before validation — so a handler that runs is still
+  # post-validation and IS collected (felixefelip/rbs_rails: e.g. Card's
+  # `after_update :handle_board_change, if: :saved_change_to_board_id?`).
+  def test_collects_conditional_if
     result = by_class(<<~RUBY)
       class Foo < ApplicationRecord
         after_save :a, if: :ready?
       end
     RUBY
 
-    assert_empty result
+    assert_equal [:a], result["Foo"]
   end
 
-  def test_skips_conditional_unless
+  def test_collects_conditional_unless
     result = by_class(<<~RUBY)
       class Foo < ApplicationRecord
         after_save :a, unless: :skip?
       end
     RUBY
 
-    assert_empty result
+    assert_equal [:a], result["Foo"]
+  end
+
+  # A Proc/lambda CONDITION is fine — only a Proc/lambda HANDLER can't be
+  # translated. The Symbol handler is still collected.
+  def test_collects_conditional_with_proc_condition
+    result = by_class(<<~RUBY)
+      class Foo < ApplicationRecord
+        after_update :a, if: -> { ready? }
+      end
+    RUBY
+
+    assert_equal [:a], result["Foo"]
+  end
+
+  # The conditional handler still gets its transitive self-call closure
+  # narrowed, mirroring Card#handle_board_change -> track_board_change_event.
+  def test_collects_conditional_handler_with_self_call_closure
+    result = by_class(<<~RUBY)
+      class Card < ApplicationRecord
+        after_update :handle_board_change, if: :saved_change_to_board_id?
+
+        def handle_board_change
+          track_board_change_event
+        end
+
+        def track_board_change_event
+          board.name
+        end
+      end
+    RUBY
+
+    assert_equal [:handle_board_change, :track_board_change_event], result["Card"].sort
   end
 
   def test_skips_block_handler

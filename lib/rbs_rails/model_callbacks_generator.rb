@@ -17,8 +17,14 @@ module RbsRails
   #   after_validation, before_save, before_create, before_update,
   #   after_create, after_update, after_save, after_commit
   #
+  # Conditional callbacks (`if:` / `unless:`) ARE included: the condition only
+  # gates WHETHER the callback runs, never moving it before validation. A
+  # handler that runs is still post-validation, so refining `self` to
+  # `Model & Model::Validated` at its entry stays sound (felixefelip/rbs_rails:
+  # `after_update :handle_board_change, if: :saved_change_to_board_id?` is just
+  # as validated as an unconditional `after_update`).
+  #
   # Skipped (valid Rails the generator can't soundly translate, no warning):
-  #   - conditional callbacks (`if:` / `unless:`)
   #   - block / proc / callable-object handlers (only literal Symbols)
   #
   # Out of scope: `before_validation` (runs pre-validation), and
@@ -149,8 +155,9 @@ module RbsRails
     end
 
     # Returns the literal Symbol handlers of a callback call, or `[]` if the
-    # whole call must be skipped (conditional, block, proc/lambda, callable
-    # object, or no symbol handler).
+    # whole call must be skipped (block, proc/lambda, callable object, or no
+    # symbol handler). Conditional `if:`/`unless:` callbacks are NOT skipped —
+    # the condition doesn't affect the post-validation invariant.
     def handler_symbols(call)
       return [] if call.block # after_save { ... }
 
@@ -164,13 +171,12 @@ module RbsRails
           sym = arg.value&.to_sym
           syms << sym if sym
         when Prism::KeywordHashNode, Prism::HashNode
-          # Options hash: `on:`/`prepend:` are fine, but `if:`/`unless:` make
-          # the callback conditional — skip the whole declaration.
-          arg.elements.each do |assoc|
-            next unless assoc.is_a?(Prism::AssocNode)
-            next unless assoc.key.is_a?(Prism::SymbolNode)
-            return [] if %w[if unless].include?(assoc.key.value)
-          end
+          # Options hash (`on:`, `prepend:`, `if:`, `unless:`): no handler
+          # symbols to collect, and none of these options affect the
+          # post-validation invariant — `if:`/`unless:` only gate whether the
+          # callback runs, not when, so the handler is still post-validation
+          # whenever it runs. Ignore the hash.
+          next
         else
           # proc, lambda, callable object — can't translate this handler.
           return []
