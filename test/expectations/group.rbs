@@ -1,12 +1,12 @@
 # resolve-type-names: false
 
 class ::Group < ::ApplicationRecord
-  extend ::ActiveRecord::Base::ClassMethods[::Group, ::Group::ActiveRecord_Relation, ::Integer]
+  extend ::ActiveRecord::Base::ClassMethods[::Group, ::Group::ActiveRecord_Relation, ::Integer, ::Group::Validated]
 
   module ::Group::GeneratedAttributeMethods
-    def id: () -> ::Integer
+    def id: () -> ::Integer?
 
-    def id=: (::Integer) -> ::Integer
+    def id=: (::Integer?) -> ::Integer?
 
     def id?: () -> bool
 
@@ -40,13 +40,13 @@ class ::Group < ::ApplicationRecord
 
     def clear_id_change: () -> void
 
-    def id_before_type_cast: () -> ::Integer
+    def id_before_type_cast: () -> ::Integer?
 
-    def id_for_database: () -> ::Integer
+    def id_for_database: () -> ::Integer?
 
-    def created_at: () -> ::ActiveSupport::TimeWithZone
+    def created_at: () -> ::ActiveSupport::TimeWithZone?
 
-    def created_at=: (::ActiveSupport::TimeWithZone) -> ::ActiveSupport::TimeWithZone
+    def created_at=: (::ActiveSupport::TimeWithZone?) -> ::ActiveSupport::TimeWithZone?
 
     def created_at?: () -> bool
 
@@ -80,13 +80,13 @@ class ::Group < ::ApplicationRecord
 
     def clear_created_at_change: () -> void
 
-    def created_at_before_type_cast: () -> ::Time
+    def created_at_before_type_cast: () -> ::Time?
 
-    def created_at_for_database: () -> ::Time
+    def created_at_for_database: () -> ::Time?
 
-    def updated_at: () -> ::ActiveSupport::TimeWithZone
+    def updated_at: () -> ::ActiveSupport::TimeWithZone?
 
-    def updated_at=: (::ActiveSupport::TimeWithZone) -> ::ActiveSupport::TimeWithZone
+    def updated_at=: (::ActiveSupport::TimeWithZone?) -> ::ActiveSupport::TimeWithZone?
 
     def updated_at?: () -> bool
 
@@ -120,9 +120,9 @@ class ::Group < ::ApplicationRecord
 
     def clear_updated_at_change: () -> void
 
-    def updated_at_before_type_cast: () -> ::Time
+    def updated_at_before_type_cast: () -> ::Time?
 
-    def updated_at_for_database: () -> ::Time
+    def updated_at_for_database: () -> ::Time?
   end
   include ::Group::GeneratedAttributeMethods
   module ::Group::GeneratedAliasAttributeMethods
@@ -169,7 +169,7 @@ class ::Group < ::ApplicationRecord
     alias id_value_for_database id_for_database
   end
   include ::Group::GeneratedAliasAttributeMethods
-  def users: () -> ::User::ActiveRecord_Associations_CollectionProxy
+  def users: () -> ::Group_User::ActiveRecord_Associations_CollectionProxy
   def users=: (::User::ActiveRecord_Associations_CollectionProxy | ::Array[::User]) -> (::User::ActiveRecord_Associations_CollectionProxy | ::Array[::User])
   def user_ids: () -> ::Array[::Integer]
   def user_ids=: (::Array[::Integer]) -> ::Array[::Integer]
@@ -191,13 +191,13 @@ class ::Group < ::ApplicationRecord
   class ::Group::ActiveRecord_Relation < ::ActiveRecord::Relation
     include ::Enumerable[::Group]
     include ::Group::GeneratedRelationMethods
-    include ::ActiveRecord::Relation::Methods[::Group, ::Integer]
+    include ::ActiveRecord::Relation::Methods[::Group, ::Integer, ::Group::Validated]
   end
 
   class ::Group::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
     include ::Enumerable[::Group]
     include ::Group::GeneratedRelationMethods
-    include ::ActiveRecord::Relation::Methods[::Group, ::Integer]
+    include ::ActiveRecord::Relation::Methods[::Group, ::Integer, ::Group::Validated]
 
     def build: (?::ActiveRecord::Associations::CollectionProxy::_EachPair attributes) ?{ () -> untyped } -> ::Group
              | (::Array[::ActiveRecord::Associations::CollectionProxy::_EachPair] attributes) ?{ () -> untyped } -> ::Array[::Group]
@@ -212,6 +212,18 @@ class ::Group < ::ApplicationRecord
     def destroy: (*::Group | ::Integer) -> ::Array[::Group]
     def <<: (*::Group | ::Array[::Group]) -> self
     def prepend: (*::Group | ::Array[::Group]) -> self
+  end
+
+  class ::Group::Validated
+    def id: () -> ::Integer
+    def created_at: () -> ::ActiveSupport::TimeWithZone
+    def updated_at: () -> ::ActiveSupport::TimeWithZone
+  end
+end
+
+module Group_User
+  class ActiveRecord_Associations_CollectionProxy < ::User::ActiveRecord_Associations_CollectionProxy
+    def owner: () -> ::Group
   end
 end
 
