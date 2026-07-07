@@ -69,6 +69,8 @@ module RbsRails
 
           #{footer}
 
+          #{owner_association_proxy_decls}
+
           #{dependencies.build}
         RBS
       end
@@ -176,13 +178,76 @@ module RbsRails
           collection_type = "#{type}::ActiveRecord_Associations_CollectionProxy"
           @dependencies << collection_type
 
+          # The GETTER returns the owner-specific proxy (a subclass of the
+          # per-element proxy) so that `owner.assoc.create!/build/…` resolves to
+          # a per-owner construction body that a downstream tool (rbs_infer) can
+          # attach — see `owner_association_proxy_decls`. The SETTER stays on the
+          # per-element proxy: the owner-specific one is a subtype, so it is
+          # still accepted, and this keeps `assoc=` permissive.
+          owner_proxy_type = owner_collection_proxy_name(a)
+
           <<~RUBY.chomp
-            def #{a.name}: () -> #{collection_type}
+            def #{a.name}: () -> #{owner_proxy_type}
             def #{a.name}=: (#{collection_type} | ::Array[#{type}]) -> (#{collection_type} | ::Array[#{type}])
             def #{singular_name}_ids: () -> ::Array[::Integer]
             def #{singular_name}_ids=: (::Array[::Integer]) -> ::Array[::Integer]
           RUBY
         end.join("\n")
+      end
+
+      # Emits one owner-specific association proxy per `has_many`: a subclass of
+      # the element's per-element `CollectionProxy`, so `where/each/create!/…`
+      # are inherited (no blast radius) — plus a typed `owner` reader.
+      #
+      # The class exists so a downstream tool (rbs_infer) can attach a
+      # per-owner construction body (the `default:`/before_validation flow) that
+      # establishes the inverse belongs_to from the owner. rbs_rails only
+      # declares the type; it adds no body.
+      #
+      # `owner` is typed as the plain owner (`::Post`), NOT `::Post &
+      # ::Post::Validated`: the proxy can be reached on an unsaved/unvalidated
+      # record (`Post.new.assignments…`), so asserting `Validated` here would be
+      # unsound. A non-nil owner is enough to establish the inverse belongs_to;
+      # narrowing a required association further is a separate concern.
+      #
+      # Declared at top level (after the model body) as `module <Owner>_<Element>`
+      # — a synthetic namespace mirroring the per-element
+      # `<Element>::ActiveRecord_Associations_CollectionProxy`. Deduplicated by
+      # namespace so a model with two `has_many` to the same element does not
+      # emit the module twice (that rarer case shares one proxy for now).
+      private def owner_association_proxy_decls #: String
+        seen = {} #: Hash[String, bool]
+        klass.reflect_on_all_associations(:has_many).filter_map do |a|
+          ns = owner_collection_proxy_namespace(a)
+          next if seen[ns]
+
+          seen[ns] = true
+          element_proxy = "#{Util.module_name(a.klass)}::ActiveRecord_Associations_CollectionProxy"
+          @dependencies << element_proxy
+
+          <<~RBS.chomp
+            module #{ns}
+              class ActiveRecord_Associations_CollectionProxy < #{element_proxy}
+                def owner: () -> #{klass_name}
+              end
+            end
+          RBS
+        end.join("\n\n")
+      end
+
+      # `Post has_many :assignments` -> `Post_Assignment` (the synthetic
+      # namespace of the owner-specific proxy). `::` in a namespaced owner/element
+      # is flattened to `_`.
+      private def owner_collection_proxy_namespace(a) #: String
+        owner = Util.module_name(klass, abs: false).gsub("::", "_")
+        element = Util.module_name(a.klass, abs: false).gsub("::", "_")
+        "#{owner}_#{element}"
+      end
+
+      # The fully-qualified owner-specific proxy type,
+      # e.g. `::Post_Assignment::ActiveRecord_Associations_CollectionProxy`.
+      private def owner_collection_proxy_name(a) #: String
+        "::#{owner_collection_proxy_namespace(a)}::ActiveRecord_Associations_CollectionProxy"
       end
 
       private def has_and_belongs_to_many #: String
