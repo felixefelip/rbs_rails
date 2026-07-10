@@ -295,7 +295,6 @@ end
 
 module Order_Book
   class ActiveRecord_Associations_CollectionProxy < ::Book::ActiveRecord_Associations_CollectionProxy
-    def owner: () -> ::Order
   end
 end
 

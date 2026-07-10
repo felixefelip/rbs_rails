@@ -192,20 +192,16 @@ module RbsRails
         end.join("\n")
       end
 
-      # Emits one owner-specific association proxy per `has_many`: a subclass of
-      # the element's per-element `CollectionProxy`, so `where/each/create!/…`
-      # are inherited (no blast radius) — plus a typed `owner` reader.
+      # Emits one owner-specific association proxy per `has_many`: an (empty)
+      # subclass of the element's per-element `CollectionProxy`, so
+      # `where/each/create!/…` are inherited (no blast radius).
       #
-      # The class exists so a downstream tool (rbs_infer) can attach a
-      # per-owner construction body (the `default:`/before_validation flow) that
+      # The class exists purely so a downstream tool (rbs_infer) can reopen it
+      # and attach the per-owner members — the `owner` reader and the per-owner
+      # construction body (the `default:`/before_validation flow) that
       # establishes the inverse belongs_to from the owner. rbs_rails only
-      # declares the type; it adds no body.
-      #
-      # `owner` is typed as the plain owner (`::Post`), NOT `::Post &
-      # ::Post::Validated`: the proxy can be reached on an unsaved/unvalidated
-      # record (`Post.new.assignments…`), so asserting `Validated` here would be
-      # unsound. A non-nil owner is enough to establish the inverse belongs_to;
-      # narrowing a required association further is a separate concern.
+      # declares the class; it emits no members (they would collide with the
+      # ones rbs_infer infers).
       #
       # Declared at top level (after the model body) as `module <Owner>_<Element>`
       # — a synthetic namespace mirroring the per-element
@@ -225,7 +221,6 @@ module RbsRails
           <<~RBS.chomp
             module #{ns}
               class ActiveRecord_Associations_CollectionProxy < #{element_proxy}
-                def owner: () -> #{klass_name}
               end
             end
           RBS

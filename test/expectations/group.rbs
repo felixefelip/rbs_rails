@@ -222,7 +222,6 @@ end
 
 module Group_User
   class ActiveRecord_Associations_CollectionProxy < ::User::ActiveRecord_Associations_CollectionProxy
-    def owner: () -> ::Group
   end
 end
 
