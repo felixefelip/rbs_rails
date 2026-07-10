@@ -169,7 +169,6 @@ class ::Group < ::ApplicationRecord
     alias id_value_for_database id_for_database
   end
   include ::Group::GeneratedAliasAttributeMethods
-  def users: () -> ::Group_User::ActiveRecord_Associations_CollectionProxy
   def users=: (::User::ActiveRecord_Associations_CollectionProxy | ::Array[::User]) -> (::User::ActiveRecord_Associations_CollectionProxy | ::Array[::User])
   def user_ids: () -> ::Array[::Integer]
   def user_ids=: (::Array[::Integer]) -> ::Array[::Integer]
