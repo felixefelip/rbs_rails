@@ -249,7 +249,6 @@ class ::Order < ::ApplicationRecord
     alias id_value_for_database id_for_database
   end
   include ::Order::GeneratedAliasAttributeMethods
-  def book: () -> ::Order_Book::ActiveRecord_Associations_CollectionProxy
   def book=: (::Book::ActiveRecord_Associations_CollectionProxy | ::Array[::Book]) -> (::Book::ActiveRecord_Associations_CollectionProxy | ::Array[::Book])
   def book_ids: () -> ::Array[::Integer]
   def book_ids=: (::Array[::Integer]) -> ::Array[::Integer]
@@ -296,7 +295,6 @@ end
 
 module Order_Book
   class ActiveRecord_Associations_CollectionProxy < ::Book::ActiveRecord_Associations_CollectionProxy
-    def owner: () -> ::Order
   end
 end
 
