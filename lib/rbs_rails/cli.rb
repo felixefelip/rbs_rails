@@ -195,35 +195,27 @@ module RbsRails
     end
 
     # Writes the `.steep_callbacks.yml` sidecar consumed by Steep
-    # (felixefelip/steep#27, `Steep::Callbacks`). Aggregates two sources:
-    #   - controller `before_action` callbacks, by walking every `.rb` under
-    #     `app/controllers/` with `CallbacksGenerator` (`apply_postcondition_of`
-    #     entries);
-    #   - model after-validation callbacks collected during `generate_models`
-    #     (`applies_self` entries refining `self` to `Model::Validated`).
-    # No-op if neither source produces an entry, so untouched projects don't
-    # get a stray file.
+    # (felixefelip/steep#27, `Steep::Callbacks`): model after-validation
+    # callbacks collected during `generate_models`, as `applies_self` entries
+    # refining `self` to `Model::Validated`.
+    #
+    # Controller `before_action` callbacks USED to be aggregated here too, as
+    # `apply_postcondition_of` entries derived from the declarations. rbs_infer's
+    # controller-runtime pseudo-code now models the effective chain directly —
+    # ancestors, `only:`/`except:`/`skip_before_action`, `if:`/`unless:`, and the
+    # halt after each link — and the checker proves the same ivar facts by
+    # reading it. Deriving them a second time from the declarations added
+    # nothing: with the controller entries stripped from the sidecar, the
+    # rbs_infer dummy reports zero new type errors.
+    #
+    # No-op when no model contributes an entry, so untouched projects don't get a
+    # stray file.
     def generate_callbacks_sidecar #: void
-      entries = [] #: Array[Hash[String, untyped]]
-
-      controllers_dir = controllers_root
-      if controllers_dir.exist?
-        Pathname.glob(controllers_dir.join("**/*.rb")).sort.each do |path|
-          source = path.read
-          gen = RbsRails::CallbacksGenerator.new(source: source, path: path.to_s)
-          entries.concat(gen.entries)
-        rescue StandardError => e
-          warn "[rbs_rails] failed to parse #{path}: #{e.class}: #{e.message}"
-        end
-      end
-
-      entries.concat(@callback_entries) if @callback_entries
+      entries = @callback_entries || []
 
       return if entries.empty?
 
-      sorted = entries.sort_by do |e|
-        [e["class"].to_s, e["apply_postcondition_of"].to_s, e["applies_self"].to_s]
-      end
+      sorted = entries.sort_by { |e| [e["class"].to_s, e["applies_self"].to_s] }
 
       out_path = config.signature_root_dir.join(".steep_callbacks.yml")
       out_path.dirname.mkpath
@@ -232,14 +224,6 @@ module RbsRails
       )
     end
 
-    # Default controllers root. Uses `Dir.pwd` so the standalone
-    # `callbacks` subcommand doesn't require loading the whole Rails
-    # app, and the CLI works the same whether `Rails.root` is set or
-    # not. Production users invoke `rbs_rails` from the project root,
-    # which is the same as `Rails.root` anyway.
-    private def controllers_root #: Pathname
-      Pathname(Dir.pwd).join("app/controllers")
-    end
 
     # Collapses entries with the same (class, method): combines per-branch
     # bodies (`when_true`/`when_false`) so `self:` from the target meets
