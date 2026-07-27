@@ -11,7 +11,6 @@ require_relative 'rbs_rails/active_record/scope'
 require_relative 'rbs_rails/path_helpers'
 require_relative 'rbs_rails/flash_helpers'
 require_relative 'rbs_rails/dependency_builder'
-require_relative 'rbs_rails/callbacks_generator'
 require_relative 'rbs_rails/model_callbacks_generator'
 
 module RbsRails
