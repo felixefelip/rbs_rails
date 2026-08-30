@@ -87,6 +87,8 @@ module RbsRails
 
       private def generated_relation_methods_name: () -> String
 
+      private def generated_enum_methods_name: () -> String
+
       private def columns: () -> untyped
 
       private def alias_columns: () -> untyped

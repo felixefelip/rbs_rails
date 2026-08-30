@@ -910,6 +910,33 @@ module RbsRails
         end.compact.join("\n")
       end
 
+      # A MODULE the class includes, not methods written into the class body,
+      # because that is where Rails puts them: `enum` builds an anonymous
+      # `EnumMethods` module and `include`s it (`_enum_methods_module` in
+      # activerecord's `enum.rb`), and `detect_enum_conflict!` only objects when
+      # the name is already taken INSIDE that module. Overriding a predicate in
+      # the class body and reaching the generated one with `super` is therefore
+      # supported by design, and apps write it:
+      #
+      #     enum :role, %i[ owner admin member ]
+      #
+      #     def admin?
+      #       super || owner?
+      #     end
+      #
+      # Written flat into the class body, that override could not be expressed.
+      # It collided with this declaration as a second non-overloading definition
+      # of the same method (`RBS::DuplicatedMethodDefinition`) instead of
+      # overriding it, and its `super` had no ancestor declaring the method to
+      # reach. A module is the same shape the generator already emits for the
+      # three other families of runtime-defined methods —
+      # `GeneratedAssociationMethods`, `GeneratedRelationMethods`, and
+      # `has_secure_password`'s activation module — and the enum predicates were
+      # the only ones left flattened.
+      #
+      # Nothing when the model has no enum instance methods (no enums, or every
+      # one declared `instance_methods: false`): an empty module included by
+      # every model would be noise standing for nothing.
       private def enum_instance_methods #: String
         # @type var methods: Array[String]
         methods = []
@@ -921,8 +948,14 @@ module RbsRails
             end
           end
         end
+        return "" if methods.empty?
 
-        methods.join("\n")
+        <<~RBS
+          module #{generated_enum_methods_name}
+            #{methods.join("\n")}
+          end
+          include #{generated_enum_methods_name}
+        RBS
       end
 
       # @rbs singleton: untyped
@@ -1047,6 +1080,10 @@ module RbsRails
 
       private def generated_relation_methods_name #: String
         "#{klass_name}::GeneratedRelationMethods"
+      end
+
+      private def generated_enum_methods_name #: String
+        "#{klass_name}::GeneratedEnumMethods"
       end
 
 

@@ -1,0 +1,11 @@
+# Another generator's declaration of the same override — the shape an app hits
+# when a tool that reads the SOURCE (rbs_infer) emits the `def accepted?` this
+# app writes, alongside the one rbs_rails derives from `enum :status`.
+#
+# It is only a legal override, rather than a second definition of the same
+# method, because the generated predicates live in an included module. Written
+# flat into the class body they collided here as
+# `RBS::DuplicatedMethodDefinition`.
+class User
+  def accepted?: () -> bool
+end
