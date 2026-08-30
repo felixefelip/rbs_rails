@@ -656,14 +656,25 @@ class ::User < ::ApplicationRecord
   end
   include ::User::ActiveModel_SecurePassword_InstanceMethodsOnActivation_password
 
-  def temporary!: () -> bool
-  def temporary?: () -> bool
-  def accepted!: () -> bool
-  def accepted?: () -> bool
-  def member!: () -> bool
-  def member?: () -> bool
-  def manager!: () -> bool
-  def manager?: () -> bool
+  module ::User::GeneratedEnumMethods
+    def temporary!: () -> bool
+
+    def temporary?: () -> bool
+
+    def accepted!: () -> bool
+
+    def accepted?: () -> bool
+
+    def member!: () -> bool
+
+    def member?: () -> bool
+
+    def manager!: () -> bool
+
+    def manager?: () -> bool
+  end
+  include ::User::GeneratedEnumMethods
+
   def self.statuses: () -> ::ActiveSupport::HashWithIndifferentAccess[::String, ::Integer]
   def self.alias_roles: () -> ::ActiveSupport::HashWithIndifferentAccess[::String, ::Integer]
   def self.labels: () -> ::ActiveSupport::HashWithIndifferentAccess[::String, ::Integer]

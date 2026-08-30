@@ -19,4 +19,15 @@ class User < ApplicationRecord
   enum :status, [:temporary, :accepted], default: :temporary
   enum :alias_role, [:member, :manager], default: :member
   enum :label, [:gold, :silver], default: :gold, scopes: false, instance_methods: false
+
+  # Overriding a generated enum predicate and reaching the generated one with
+  # `super`. Rails supports this by design — `enum` defines its predicates in an
+  # anonymous module it includes, so a def in the class body overrides them —
+  # and it only type-checks if the generated declaration lives in a module here
+  # too. Written flat into the class body it was a second non-overloading
+  # definition of `accepted?` rather than the one this overrides, and `super`
+  # had no ancestor to reach.
+  def accepted?
+    super || temporary?
+  end
 end
