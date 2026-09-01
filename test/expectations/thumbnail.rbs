@@ -224,13 +224,13 @@ class ::Thumbnail < ::ApplicationRecord
   end
 
   class ::Thumbnail::ActiveRecord_Relation < ::ActiveRecord::Relation
-    include ::Enumerable[::Thumbnail]
+    include ::Enumerable[::Thumbnail & ::Thumbnail::Validated]
     include ::Thumbnail::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Thumbnail, ::Integer, ::Thumbnail::Validated]
   end
 
   class ::Thumbnail::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
-    include ::Enumerable[::Thumbnail]
+    include ::Enumerable[::Thumbnail & ::Thumbnail::Validated]
     include ::Thumbnail::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Thumbnail, ::Integer, ::Thumbnail::Validated]
 

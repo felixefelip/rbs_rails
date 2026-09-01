@@ -264,13 +264,13 @@ class ::Book < ::ApplicationRecord
   end
 
   class ::Book::ActiveRecord_Relation < ::ActiveRecord::Relation
-    include ::Enumerable[::Book]
+    include ::Enumerable[::Book & ::Book::Validated]
     include ::Book::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Book, ::Integer, ::Book::Validated]
   end
 
   class ::Book::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
-    include ::Enumerable[::Book]
+    include ::Enumerable[::Book & ::Book::Validated]
     include ::Book::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Book, ::Integer, ::Book::Validated]
 

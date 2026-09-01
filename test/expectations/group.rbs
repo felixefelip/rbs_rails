@@ -188,13 +188,13 @@ class ::Group < ::ApplicationRecord
   end
 
   class ::Group::ActiveRecord_Relation < ::ActiveRecord::Relation
-    include ::Enumerable[::Group]
+    include ::Enumerable[::Group & ::Group::Validated]
     include ::Group::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Group, ::Integer, ::Group::Validated]
   end
 
   class ::Group::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
-    include ::Enumerable[::Group]
+    include ::Enumerable[::Group & ::Group::Validated]
     include ::Group::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Group, ::Integer, ::Group::Validated]
 
