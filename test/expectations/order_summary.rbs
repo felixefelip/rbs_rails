@@ -218,13 +218,13 @@ class ::OrderSummary < ::ApplicationRecord
   end
 
   class ::OrderSummary::ActiveRecord_Relation < ::ActiveRecord::Relation
-    include ::Enumerable[::OrderSummary]
+    include ::Enumerable[::OrderSummary & ::OrderSummary::Validated]
     include ::OrderSummary::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::OrderSummary, [ ::ActiveSupport::TimeWithZone, ::Integer ], ::OrderSummary::Validated]
   end
 
   class ::OrderSummary::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
-    include ::Enumerable[::OrderSummary]
+    include ::Enumerable[::OrderSummary & ::OrderSummary::Validated]
     include ::OrderSummary::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::OrderSummary, [ ::ActiveSupport::TimeWithZone, ::Integer ], ::OrderSummary::Validated]
 

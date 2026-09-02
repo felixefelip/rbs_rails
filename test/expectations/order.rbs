@@ -261,13 +261,13 @@ class ::Order < ::ApplicationRecord
   end
 
   class ::Order::ActiveRecord_Relation < ::ActiveRecord::Relation
-    include ::Enumerable[::Order]
+    include ::Enumerable[::Order & ::Order::Validated]
     include ::Order::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Order, [ ::Integer, ::Integer ], ::Order::Validated]
   end
 
   class ::Order::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
-    include ::Enumerable[::Order]
+    include ::Enumerable[::Order & ::Order::Validated]
     include ::Order::GeneratedRelationMethods
     include ::ActiveRecord::Relation::Methods[::Order, [ ::Integer, ::Integer ], ::Order::Validated]
 

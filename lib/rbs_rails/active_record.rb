@@ -104,7 +104,7 @@ module RbsRails
       private def relation_decl #: String
         <<~RBS
           class #{relation_class_name} < ::ActiveRecord::Relation
-            include ::Enumerable[#{klass_name}]
+            include ::Enumerable[#{enumerable_element_type}]
             include #{generated_relation_methods_name}
             include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}#{validated_model_arg}]
           end
@@ -114,7 +114,7 @@ module RbsRails
       private def collection_proxy_decl #: String
         <<~RBS
           class #{klass_name}::ActiveRecord_Associations_CollectionProxy < ::ActiveRecord::Associations::CollectionProxy
-            include ::Enumerable[#{klass_name}]
+            include ::Enumerable[#{enumerable_element_type}]
             include #{generated_relation_methods_name}
             include ::ActiveRecord::Relation::Methods[#{klass_name}, #{pk_type}#{validated_model_arg}]
 
@@ -347,6 +347,22 @@ module RbsRails
         return "" if narrowed_method_decls(validated_marker_attrs).empty?
 
         ", #{klass_name}::Validated"
+      end
+
+      # The element type every `Enumerable` method on a Relation /
+      # CollectionProxy yields. A record reached by iterating a relation
+      # came back from the database, so it is persisted and satisfies the
+      # same guarantees `Validated` states — which is already the
+      # assumption `Relation::Methods` makes for `each`, `first`, `find`,
+      # `[]` and `to_ary`. `Enumerable` derives the rest of its interface
+      # (`map`, `select`, `flat_map`, `group_by`, `sort_by`, `to_a`, …)
+      # from `each`, so parameterizing it with a bare `Model` silently
+      # widened those back to nilable-everything; this keeps them in step
+      # with `each`.
+      private def enumerable_element_type #: String
+        return klass_name if validated_model_arg.empty?
+
+        "(#{klass_name} & #{klass_name}::Validated)"
       end
 
       # The attribute list that populates `Validated`. Order matters only
