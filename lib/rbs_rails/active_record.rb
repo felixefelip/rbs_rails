@@ -432,30 +432,89 @@ module RbsRails
       #
       # Sound because such callbacks only run once the record satisfies its
       # validations, so inside e.g. `after_save :atualizar_calendario` a
-      # required `belongs_to` association is non-nil. Empty unless the model
-      # has a meaningful `Validated` marker. `source_path` is the model's
-      # source file (callback declarations are read from it via Prism).
+      # required `belongs_to` association is non-nil.
+      #
+      # The declaration is read from source via Prism, from the model's own file
+      # (`source_path`) AND from every app-defined module in its ancestry: the
+      # dominant Rails shape puts the macro in a concern's `included do`, which
+      # `app/models/user.rb` alone does not show. An entry is keyed by the scope
+      # the HANDLER is checked in (the concern, for a def in the concern's body),
+      # while the narrowing is always the host model's — see
+      # `ModelCallbacksGenerator`.
+      #
+      # The model's own scope is skipped when it has no meaningful `Validated`
+      # marker (nothing to narrow to). A concern's is emitted regardless, marked
+      # `narrows: false`, so the union the sidecar writer builds over the
+      # concern's several hosts does not silently drop one of them.
       #
       # @rbs source_path: String?
       def callback_entries(source_path) #: Array[Hash[String, untyped]]
-        return [] unless has_validated_marker?
-        return [] unless source_path && File.file?(source_path)
-
-        methods = ModelCallbacksGenerator.new(source: File.read(source_path)).callbacks_by_class[klass.name] || []
-        return [] if methods.empty?
-
         short = klass_name(abs: false)
         markers = ["#{short}::Validated", *validated_through_marker_fqns]
-        [
+        narrows = has_validated_marker?
+        applies_self = narrows ? ([short] + markers).join(" & ") : short
+
+        scopes = {} #: Hash[String, Array[Symbol]]
+        callback_sources(source_path).each do |scope_owner, path|
+          generator = ModelCallbacksGenerator.new(source: File.read(path), path: path, host: klass.name)
+          generator.callbacks_by_class.each do |scope, methods|
+            # Other classes declared in the same file answer to their own
+            # generator; only this model and the module we opened the file for.
+            next unless scope == klass.name || scope == scope_owner
+            next if scope == klass.name && !narrows
+
+            (scopes[scope] ||= []).concat(methods)
+          end
+        end
+
+        scopes.filter_map do |scope, methods|
+          methods = methods.uniq
+          next if methods.empty?
+
           {
-            "class" => short,
-            "applies_self" => ([short] + markers).join(" & "),
+            "class" => scope,
+            "applies_self" => applies_self,
+            "narrows" => narrows,
             "runs_before" => methods.map(&:to_s)
           }
-        ]
+        end
       rescue StandardError => e
         warn "[rbs_rails] failed to read callbacks for #{klass.name}: #{e.class}: #{e.message}"
         []
+      end
+
+      # `[scope name, source file]` for every place this model's lifecycle
+      # callbacks may be declared: its own file, then each app-defined module in
+      # its ancestry (concerns included into it, and into `ApplicationRecord` —
+      # those run on every model, so they belong here too).
+      #
+      # Gem and framework modules are excluded by source location: only files
+      # under `Rails.root` are the app's to read.
+      #
+      # @rbs source_path: String?
+      private def callback_sources(source_path) #: Array[[String, String]]
+        sources = [] #: Array[[String, String]]
+        sources << [klass.name, source_path] if source_path && File.file?(source_path)
+
+        klass.ancestors.each do |mod|
+          next if mod.is_a?(Class)
+
+          name = mod.name
+          next unless name
+
+          path, _line = Object.const_source_location(name) rescue nil
+          next unless path && File.file?(path) && app_source?(path)
+
+          sources << [name, path]
+        end
+
+        sources.uniq
+      end
+
+      # @rbs path: String
+      private def app_source?(path) #: bool
+        root = (defined?(::Rails) && ::Rails.respond_to?(:root) && ::Rails.root) or return false
+        Pathname.new(path).fnmatch?("#{root}/**")
       end
 
       # Through-derived markers (`has_one :x, through: :y`, issue #2) that hold

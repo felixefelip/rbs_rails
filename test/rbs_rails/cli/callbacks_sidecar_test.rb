@@ -103,4 +103,86 @@ class CallbacksSidecarTest < Minitest::Test
       assert_equal %w[Alpha Zeta], payload["callbacks"].map { |e| e["class"] }
     end
   end
+
+  # A concern included into two models: each model's generator emits its own
+  # entry for the same `class:`. Steep applies both and the last `applies_self`
+  # wins, so they have to collapse into the union of the hosts.
+  def test_unions_the_hosts_of_a_shared_concern
+    with_tmp_project do |dir|
+      configure_sidecar_dir(dir)
+
+      cli = RbsRails::CLI.new
+      cli.instance_variable_set(:@callback_entries, [
+        { "class" => "Searchable", "applies_self" => "Card & Card::Validated",
+          "narrows" => true, "runs_before" => ["create_in_search_index"] },
+        { "class" => "Searchable", "applies_self" => "Comment & Comment::Validated",
+          "narrows" => true, "runs_before" => ["create_in_search_index"] }
+      ])
+      cli.send(:generate_callbacks_sidecar)
+
+      payload = YAML.safe_load(sidecar_path.read)
+      assert_equal 1, payload["callbacks"].size
+      assert_equal "(Card & Card::Validated) | (Comment & Comment::Validated)",
+                   payload["callbacks"].first["applies_self"]
+      assert_equal ["create_in_search_index"], payload["callbacks"].first["runs_before"]
+    end
+  end
+
+  # A host with no meaningful `Validated` marker still contributes its bare
+  # type, so the union does not claim the concern's `self` is always validated.
+  def test_a_host_without_a_marker_stays_in_the_union
+    with_tmp_project do |dir|
+      configure_sidecar_dir(dir)
+
+      cli = RbsRails::CLI.new
+      cli.instance_variable_set(:@callback_entries, [
+        { "class" => "Searchable", "applies_self" => "Card & Card::Validated",
+          "narrows" => true, "runs_before" => ["reindex"] },
+        { "class" => "Searchable", "applies_self" => "Audit",
+          "narrows" => false, "runs_before" => ["reindex"] }
+      ])
+      cli.send(:generate_callbacks_sidecar)
+
+      payload = YAML.safe_load(sidecar_path.read)
+      assert_equal "Audit | (Card & Card::Validated)", payload["callbacks"].first["applies_self"]
+    end
+  end
+
+  # Nothing narrows: the union would only restate the declared self.
+  def test_drops_a_method_no_host_narrows
+    with_tmp_project do |dir|
+      configure_sidecar_dir(dir)
+
+      cli = RbsRails::CLI.new
+      cli.instance_variable_set(:@callback_entries, [
+        { "class" => "Searchable", "applies_self" => "Audit",
+          "narrows" => false, "runs_before" => ["reindex"] }
+      ])
+      cli.send(:generate_callbacks_sidecar)
+
+      refute sidecar_path.exist?, "expected no sidecar when no host narrows"
+    end
+  end
+
+  # Two methods of one class narrowed by different host sets: one entry each,
+  # not one entry carrying the wrong union for one of them.
+  def test_splits_a_class_whose_methods_have_different_unions
+    with_tmp_project do |dir|
+      configure_sidecar_dir(dir)
+
+      cli = RbsRails::CLI.new
+      cli.instance_variable_set(:@callback_entries, [
+        { "class" => "Searchable", "applies_self" => "Card & Card::Validated",
+          "narrows" => true, "runs_before" => %w[shared card_only] },
+        { "class" => "Searchable", "applies_self" => "Comment & Comment::Validated",
+          "narrows" => true, "runs_before" => %w[shared] }
+      ])
+      cli.send(:generate_callbacks_sidecar)
+
+      payload = YAML.safe_load(sidecar_path.read)
+      by_self = payload["callbacks"].to_h { |e| [e["applies_self"], e["runs_before"]] }
+      assert_equal ["shared"], by_self["(Card & Card::Validated) | (Comment & Comment::Validated)"]
+      assert_equal ["card_only"], by_self["Card & Card::Validated"]
+    end
+  end
 end
