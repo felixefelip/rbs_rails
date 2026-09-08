@@ -406,4 +406,149 @@ class ModelCallbacksGeneratorTest < Minitest::Test
     assert_equal({ "User::Configurable" => [:create_settings],
                    "User::Configurable::Settings" => [:flush] }, result)
   end
+  # `callbacks_across` — one closure over a model's whole corpus (its own file
+  # plus each concern in its ancestry), which is what lets a callback declared
+  # in the model reach a handler defined in a concern.
+
+  def across(sources, host:)
+    Generator.callbacks_across(sources, host: host)
+  end
+
+  CARD = <<~RUBY
+    class Card < ApplicationRecord
+      after_update :handle_board_change, if: :saved_change_to_board_id?
+
+      private
+        def handle_board_change
+          track_board_change_event
+          clean_inaccessible_data_later
+        end
+
+        def track_board_change_event; end
+    end
+  RUBY
+
+  CARD_ACCESSIBLE = <<~RUBY
+    module Card::Accessible
+      extend ActiveSupport::Concern
+
+      def clean_inaccessible_data; end
+
+      private
+        def clean_inaccessible_data_later
+          Card::CleanInaccessibleDataJob.perform_later(self)
+        end
+    end
+  RUBY
+
+  def test_closure_reaches_a_handler_defined_in_a_concern
+    result = across([["Card", CARD, "card.rb"],
+                     ["Card::Accessible", CARD_ACCESSIBLE, "card/accessible.rb"]],
+                    host: "Card")
+
+    assert_equal({ "Card" => [:handle_board_change, :track_board_change_event],
+                   "Card::Accessible" => [:clean_inaccessible_data_later] }, result)
+  end
+
+  # Only what the callback reaches: a public method of the concern nothing in
+  # the closure calls keeps its declared `self`.
+  def test_closure_leaves_unreached_concern_methods_alone
+    result = across([["Card", CARD, "card.rb"],
+                     ["Card::Accessible", CARD_ACCESSIBLE, "card/accessible.rb"]],
+                    host: "Card")
+
+    refute_includes result.fetch("Card::Accessible"), :clean_inaccessible_data
+  end
+
+  # The reverse direction: a callback declared in a concern's `included do`
+  # reaching a helper defined on the model itself.
+  def test_closure_reaches_the_model_from_a_concern_declared_callback
+    concern = <<~RUBY
+      module Card::Stallable
+        extend ActiveSupport::Concern
+
+        included do
+          after_update_commit :detect_activity_spikes_later
+        end
+
+        private
+          def detect_activity_spikes_later
+            note_spike
+          end
+      end
+    RUBY
+    model = <<~RUBY
+      class Card < ApplicationRecord
+        private
+          def note_spike; end
+      end
+    RUBY
+
+    result = across([["Card", model, "card.rb"],
+                     ["Card::Stallable", concern, "card/stallable.rb"]],
+                    host: "Card")
+
+    assert_equal({ "Card::Stallable" => [:detect_activity_spikes_later],
+                   "Card" => [:note_spike] }, result)
+  end
+
+  # Another class sharing a concern's file answers to its own generator, so it
+  # must not feed this model's closure.
+  def test_reads_only_the_model_and_the_scope_the_file_was_opened_for
+    concern = <<~RUBY
+      module Card::Accessible
+        extend ActiveSupport::Concern
+
+        private
+          def clean_inaccessible_data_later; end
+      end
+
+      class Unrelated < ApplicationRecord
+        after_save :handle_board_change
+
+        def handle_board_change; end
+      end
+    RUBY
+
+    result = across([["Card", CARD, "card.rb"],
+                     ["Card::Accessible", concern, "card/accessible.rb"]],
+                    host: "Card")
+
+    refute_includes result.keys, "Unrelated"
+    assert_equal [:clean_inaccessible_data_later], result.fetch("Card::Accessible")
+  end
+
+  # First definition wins across files, which is Ruby's own resolution given
+  # the sources in method-resolution order (the model, then its ancestors).
+  def test_the_model_own_def_wins_over_a_concern_of_the_same_name
+    concern = <<~RUBY
+      module Card::Accessible
+        extend ActiveSupport::Concern
+
+        private
+          def track_board_change_event; end
+      end
+    RUBY
+
+    result = across([["Card", CARD, "card.rb"],
+                     ["Card::Accessible", concern, "card/accessible.rb"]],
+                    host: "Card")
+
+    assert_equal [:handle_board_change, :track_board_change_event], result.fetch("Card")
+    refute result.key?("Card::Accessible")
+  end
+
+  # A handler with no def anywhere still lands under the scope that DECLARED
+  # it, as it does when a single file is read.
+  def test_a_handler_with_no_def_is_filed_under_its_declaring_scope
+    model = <<~RUBY
+      class Card < ApplicationRecord
+        after_create :create_settings
+      end
+    RUBY
+
+    result = across([["Card", model, "card.rb"]], host: "Card")
+
+    assert_equal({ "Card" => [:create_settings] }, result)
+  end
 end
