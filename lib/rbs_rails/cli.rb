@@ -211,7 +211,7 @@ module RbsRails
     # No-op when no model contributes an entry, so untouched projects don't get a
     # stray file.
     def generate_callbacks_sidecar #: void
-      entries = @callback_entries || []
+      entries = merge_callback_entries(@callback_entries || [])
 
       return if entries.empty?
 
@@ -224,6 +224,64 @@ module RbsRails
       )
     end
 
+
+    # Collapses the `applies_self` callback entries of one scope.
+    #
+    # A concern is included into several models, and each model's generator
+    # emits its own entry for it — same `class:`, different `applies_self:`.
+    # Steep applies every matching entry in order and the last `applies_self`
+    # wins, so left as they are the concern would be checked against whichever
+    # host happened to sort last. Collapse them instead: per (class, method),
+    # `self` is the UNION of its hosts' narrowings, which is what the concern's
+    # declared self already is, marker-decorated.
+    #
+    # A method no host narrows (`narrows: false` everywhere — models with no
+    # unconditional presence validator, so no meaningful `Validated` marker) is
+    # dropped: its union would only restate the declared self.
+    #
+    # @rbs entries: Array[Hash[String, untyped]]
+    private def merge_callback_entries(entries) #: Array[Hash[String, untyped]]
+      # class => method => { selves: Array[String], narrows: bool }
+      collected = {} #: Hash[String, Hash[String, Hash[Symbol, untyped]]]
+
+      entries.each do |entry|
+        methods = entry["runs_before"]
+        next unless methods
+
+        slot = collected[entry["class"].to_s] ||= {}
+        applies_self = entry["applies_self"].to_s
+        narrows = entry.fetch("narrows", true)
+
+        methods.each do |method|
+          info = slot[method.to_s] ||= { selves: [], narrows: false }
+          info[:selves] << applies_self unless info[:selves].include?(applies_self)
+          info[:narrows] ||= narrows
+        end
+      end
+
+      collected.flat_map do |class_name, methods|
+        # One entry per distinct union, keeping the methods in the order they
+        # were declared in.
+        grouped = {} #: Hash[String, Array[String]]
+
+        methods.each do |method, info|
+          next unless info[:narrows]
+
+          (grouped[union_self_type(info[:selves])] ||= []) << method
+        end
+
+        grouped.map do |applies_self, runs_before|
+          { "class" => class_name, "applies_self" => applies_self, "runs_before" => runs_before }
+        end
+      end
+    end
+
+    # @rbs selves: Array[String]
+    private def union_self_type(selves) #: String
+      return selves.first.to_s if selves.size == 1
+
+      selves.sort.map { |self_type| self_type.include?(" ") ? "(#{self_type})" : self_type }.join(" | ")
+    end
 
     # Collapses entries with the same (class, method): combines per-branch
     # bodies (`when_true`/`when_false`) so `self:` from the target meets
