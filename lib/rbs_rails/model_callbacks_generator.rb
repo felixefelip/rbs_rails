@@ -54,6 +54,29 @@ module RbsRails
   # `host:` when the caller passes it (nil host: such a def is skipped rather
   # than mis-keyed).
   #
+  # ## Callbacks reaching across files
+  #
+  # The closure below follows implicit-self calls, and a handler routinely calls
+  # into a concern the model includes:
+  #
+  #     class Card                            # app/models/card.rb
+  #       after_update :handle_board_change
+  #       private def handle_board_change = clean_inaccessible_data_later
+  #     end
+  #
+  #     module Card::Accessible               # app/models/card/accessible.rb
+  #       private def clean_inaccessible_data_later
+  #         Card::CleanInaccessibleDataJob.perform_later(self)
+  #       end
+  #     end
+  #
+  # Read one file at a time, the root and the def it reaches are in different
+  # scans and the closure stops at the file boundary — leaving the concern's
+  # method with its declared `self` (`Card & Card::Accessible`), which is how
+  # `perform_later(self)` handed the job an unvalidated `Card` and the
+  # precondition on `Card::Accessible#clean_inaccessible_data` went unenforced.
+  # `callbacks_across` merges the model's files into one closure so it does not.
+  #
   # Skipped (valid Rails the generator can't soundly translate, no warning):
   #   - block / proc / callable-object handlers (only literal Symbols)
   #
@@ -75,6 +98,15 @@ module RbsRails
       after_save_commit
     ].freeze
 
+    # A scope's raw material for the closure: the callback handler names the
+    # scope declares, and the instance methods its body defines.
+    #
+    # `roots` carries each handler's DECLARING scope alongside its name, because
+    # a handler with no def anywhere (an association writer such as the
+    # `create_settings` of `has_one :settings`) has no owner to be filed under
+    # and falls back to where it was declared.
+    Scan = Struct.new(:roots, :defs, keyword_init: true)
+
     # @rbs source: String -- Ruby source to parse
     # @rbs path: String? -- file path for error messages (optional)
     # @rbs host: String? -- the class a concern in this file is included into,
@@ -94,10 +126,104 @@ module RbsRails
     # A scope is the class or concern module Steep type-checks the handler in,
     # which is the key `.steep_callbacks.yml` matches on — not necessarily the
     # class the callback runs on (see "Callbacks declared in a concern").
+    #
+    # One file, one closure per scope in it. Use `callbacks_across` for a model
+    # whose declarations are spread over several files — which is the norm, and
+    # what "Callbacks reaching across files" above is about.
     def callbacks_by_class #: Hash[String, Array[Symbol]]
+      scan.each_with_object({}) do |(_scope, scanned), result|
+        next if scanned.roots.empty?
+
+        self.class.close(roots: scanned.roots, defs: scanned.defs).each do |owner, methods|
+          (result[owner] ||= []).concat(methods)
+        end
+      end.each_value(&:uniq!)
+    end
+
+    # `Hash[scope_name, Scan]` for every class/module body in this source, with
+    # no closure computed and no scope dropped for having no roots: a scope with
+    # only defs still contributes them to a closure rooted elsewhere.
+    def scan #: Hash[String, Scan]
       tree = Prism.parse(@source).value
-      result = {} #: Hash[String, Array[Symbol]]
+      result = {} #: Hash[String, Scan]
       walk(tree, namespace: [], result: result)
+      result
+    end
+
+    # One closure over ONE MODEL's whole corpus — its own file and each concern
+    # in its ancestry — rather than one per file.
+    #
+    # `sources` is `[[scope owner, source, path], ...]` in method-resolution
+    # order (the model first, then its ancestors), where "scope owner" is the
+    # scope the file was opened for: only that scope and the model's own are
+    # read from it, so an unrelated class sharing the file answers to its own
+    # generator.
+    #
+    # Merging is what makes a callback declared in the model reach a handler
+    # defined in a concern:
+    #
+    #     class Card                          # app/models/card.rb
+    #       after_update :handle_board_change
+    #       def handle_board_change = clean_inaccessible_data_later
+    #     end
+    #
+    #     module Card::Accessible             # app/models/card/accessible.rb
+    #       def clean_inaccessible_data_later = Card::CleanJob.perform_later(self)
+    #     end
+    #
+    # Per file the root `handle_board_change` and the def it reaches live in
+    # different scans, so the closure stopped at the file boundary and
+    # `clean_inaccessible_data_later` kept the concern's declared `self`
+    # (`Card & Card::Accessible`) instead of the callback's
+    # `Card & Card::Validated`. Each method is still filed under the scope that
+    # OWNS it — the concern here — because that is the scope Steep checks its
+    # body in.
+    #
+    # First definition wins when two scopes define the same name, which is
+    # Ruby's own resolution given `sources` in MRO order.
+    #
+    # @rbs sources: Array[[String, String, String?]]
+    # @rbs host: String?
+    def self.callbacks_across(sources, host:) #: Hash[String, Array[Symbol]]
+      roots = [] #: Array[[Symbol, String]]
+      defs = {} #: Hash[Symbol, [Prism::DefNode, String?]]
+
+      sources.each do |scope_owner, source, path|
+        new(source: source, path: path, host: host).scan.each do |scope, scanned|
+          next unless scope == host || scope == scope_owner
+
+          roots.concat(scanned.roots)
+          scanned.defs.each { |name, entry| defs[name] ||= entry }
+        end
+      end
+
+      close(roots: roots, defs: defs)
+    end
+
+    # `Hash[owner scope, Array[Symbol]]` — the transitive closure of `roots`
+    # over `defs`, each method filed under the scope that owns it.
+    #
+    # @rbs roots: Array[[Symbol, String]]
+    # @rbs defs: Hash[Symbol, [Prism::DefNode, String?]]
+    def self.close(roots:, defs:) #: Hash[String, Array[Symbol]]
+      declared_in = {} #: Hash[Symbol, String]
+      roots.each { |name, scope| declared_in[name] ||= scope }
+
+      result = {} #: Hash[String, Array[Symbol]]
+      transitive_self_call_closure(declared_in.keys, defs).each do |name|
+        # A handler with no def anywhere (an association writer such as the
+        # `create_settings` of `has_one :settings`) is filed under the scope
+        # that declared it: nothing is checked under that name, so the entry is
+        # inert. A def whose owner is the includer is dropped when no `host:`
+        # was given — better absent than keyed to the concern, where it is not
+        # checked.
+        entry = defs[name]
+        owner = entry ? entry.last : declared_in[name]
+        next unless owner
+
+        (result[owner] ||= []) << name
+      end
+      result.each_value(&:uniq!)
       result
     end
 
@@ -113,42 +239,41 @@ module RbsRails
         mod_name = constant_path_to_s(node.constant_path)
         return unless mod_name
         full_name = (namespace + [mod_name]).join("::")
-        emit_for_scope(node, full_name, result)
+        scan_scope(node, full_name, result)
         walk(node.body, namespace: namespace + [mod_name], result: result) if node.body
       when Prism::ClassNode
         class_name = constant_path_to_s(node.constant_path)
         return unless class_name
         full_name = (namespace + [class_name]).join("::")
-        emit_for_scope(node, full_name, result)
+        scan_scope(node, full_name, result)
         walk(node.body, namespace: namespace + [class_name], result: result) if node.body
       end
     end
 
-    # Collects one class/module body's callback roots and instance methods, and
-    # files the resulting closure under the scope that OWNS each method.
+    # Collects one class/module body's callback roots and instance methods.
     #
     # Two owners are in play, and only in a concern do they differ: a def in the
     # body belongs to `full_name` itself, while a def inside `included do`
     # belongs to the includer (`@host`) — the same split `included do` has
     # everywhere, since its block is `class_eval`d on the host.
-    def emit_for_scope(scope_node, full_name, result)
+    def scan_scope(scope_node, full_name, result)
       body = scope_node.body
       return unless body
 
-      roots = [] #: Array[Symbol]
+      roots = [] #: Array[[Symbol, String]]
       defs = {} #: Hash[Symbol, [Prism::DefNode, String?]]
 
       statements(body).each do |child|
         case child
         when Prism::CallNode
           if child.receiver.nil? && AFTER_VALIDATION_CALLBACKS.include?(child.name)
-            roots.concat(handler_symbols(child))
+            handler_symbols(child).each { |name| roots << [name, full_name] }
           elsif included_block(child)
             statements(included_block(child)).each do |inner|
               case inner
               when Prism::CallNode
                 if inner.receiver.nil? && AFTER_VALIDATION_CALLBACKS.include?(inner.name)
-                  roots.concat(handler_symbols(inner))
+                  handler_symbols(inner).each { |name| roots << [name, full_name] }
                 end
               when Prism::DefNode
                 defs[inner.name] ||= [inner, @host] if inner.receiver.nil?
@@ -161,21 +286,7 @@ module RbsRails
         end
       end
 
-      return if roots.empty?
-
-      transitive_self_call_closure(roots, defs).each do |name|
-        # A handler with no def here (an association writer such as the
-        # `create_settings` of `has_one :settings`) is filed under this scope:
-        # nothing is checked under that name, so the entry is inert. A def whose
-        # owner is the includer is dropped when no `host:` was given — better
-        # absent than keyed to the concern, where it is not checked.
-        entry = defs[name]
-        owner = entry ? entry.last : full_name
-        next unless owner
-
-        (result[owner] ||= []) << name
-      end
-      result.each_value(&:uniq!)
+      result[full_name] = Scan.new(roots: roots, defs: defs)
     end
 
     def statements(node)
@@ -208,7 +319,7 @@ module RbsRails
     #
     # `defs` maps a method name to `[def node, owning scope]`; the closure needs
     # only the node — the caller files each name under its owner.
-    def transitive_self_call_closure(roots, defs)
+    def self.transitive_self_call_closure(roots, defs)
       visited = [] #: Array[Symbol]
       queue = roots.dup #: Array[Symbol]
 
@@ -232,7 +343,7 @@ module RbsRails
     # receiver-less sends (`foo`, `foo&.x`) and explicit `self.foo`. Calls with
     # any other receiver (`vacina.count`, `Foo.bar`) are not self-calls and are
     # left out.
-    def self_calls_in(node, acc = [])
+    def self.self_calls_in(node, acc = [])
       return acc unless node.is_a?(Prism::Node)
 
       if node.is_a?(Prism::CallNode) && (node.receiver.nil? || node.receiver.is_a?(Prism::SelfNode))
@@ -241,6 +352,7 @@ module RbsRails
       node.compact_child_nodes.each { |child| self_calls_in(child, acc) }
       acc
     end
+    private_class_method :transitive_self_call_closure, :self_calls_in
 
     # Returns the literal Symbol handlers of a callback call, or `[]` if the
     # whole call must be skipped (block, proc/lambda, callable object, or no

@@ -442,10 +442,9 @@ module RbsRails
       # while the narrowing is always the host model's — see
       # `ModelCallbacksGenerator`.
       #
-      # The model's own scope is skipped when it has no meaningful `Validated`
-      # marker (nothing to narrow to). A concern's is emitted regardless, marked
-      # `narrows: false`, so the union the sidecar writer builds over the
-      # concern's several hosts does not silently drop one of them.
+      # Those files are handed to ONE closure rather than one closure each, so a
+      # callback declared in the model reaches the handlers it calls in a
+      # concern (`ModelCallbacksGenerator.callbacks_across`).
       #
       # @rbs source_path: String?
       def callback_entries(source_path) #: Array[Hash[String, untyped]]
@@ -454,18 +453,15 @@ module RbsRails
         narrows = has_validated_marker?
         applies_self = narrows ? ([short] + markers).join(" & ") : short
 
-        scopes = {} #: Hash[String, Array[Symbol]]
-        callback_sources(source_path).each do |scope_owner, path|
-          generator = ModelCallbacksGenerator.new(source: File.read(path), path: path, host: klass.name)
-          generator.callbacks_by_class.each do |scope, methods|
-            # Other classes declared in the same file answer to their own
-            # generator; only this model and the module we opened the file for.
-            next unless scope == klass.name || scope == scope_owner
-            next if scope == klass.name && !narrows
-
-            (scopes[scope] ||= []).concat(methods)
-          end
+        sources = callback_sources(source_path).map do |scope_owner, path|
+          [scope_owner, File.read(path), path]
         end
+        scopes = ModelCallbacksGenerator.callbacks_across(sources, host: klass.name)
+        # A model with no meaningful `Validated` marker has nothing to narrow
+        # to, so its own scope is dropped. A concern's is kept and marked
+        # `narrows: false`, so the union the sidecar writer builds over the
+        # concern's several hosts does not silently drop one of them.
+        scopes.delete(klass.name) unless narrows
 
         scopes.filter_map do |scope, methods|
           methods = methods.uniq
